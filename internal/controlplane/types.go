@@ -48,13 +48,20 @@ func (c Connection) Endpoint() Endpoint {
 }
 
 type Command struct {
-	CommandID    string       `json:"commandId"`
-	Kind         string       `json:"kind"`
-	NodeID       string       `json:"nodeId"`
-	ServiceID    string       `json:"serviceId"`
-	AssignmentID string       `json:"assignmentId"`
-	AccountID    string       `json:"accountId"`
-	Workspace    Workspace    `json:"workspace"`
+	CommandID    string    `json:"commandId"`
+	Kind         string    `json:"kind"`
+	NodeID       string    `json:"nodeId"`
+	ServiceID    string    `json:"serviceId"`
+	AssignmentID string    `json:"assignmentId"`
+	AccountID    string    `json:"accountId"`
+	Workspace    Workspace `json:"workspace"`
+	// RuntimeContent is an immutable compiler-owned content layer selected by
+	// the control plane. It is never an image, command, environment, URL, or
+	// storage credential supplied by a customer.
+	RuntimeContent *WorkspaceBlob `json:"runtimeContent,omitempty"`
+	// EULAAccepted is set only by a server-side terms policy adapter. The agent
+	// never derives it from customer content or an environment variable.
+	EULAAccepted bool         `json:"eulaAccepted,omitempty"`
 	Resources    Resources    `json:"resources"`
 	Connection   *Connection  `json:"connection,omitempty"`
 	Lease        CommandLease `json:"-"`

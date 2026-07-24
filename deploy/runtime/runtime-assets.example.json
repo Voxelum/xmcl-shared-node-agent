@@ -1,0 +1,22 @@
+{
+  "xmcl-shared-minecraft-runtime": {
+    "source": "CGO_ENABLED=0 go build ./cmd/xmcl-shared-minecraft-runtime",
+    "sha256": "REQUIRED_64_HEX_SHA256"
+  },
+  "busybox": {
+    "source": "trusted static busybox binary",
+    "sha256": "REQUIRED_64_HEX_SHA256"
+  },
+  "jre8": {
+    "source": "trusted XMCL-approved Java 8 archive",
+    "sha256": "REQUIRED_64_HEX_SHA256"
+  },
+  "jre17": {
+    "source": "trusted XMCL-approved Java 17 archive",
+    "sha256": "REQUIRED_64_HEX_SHA256"
+  },
+  "jre21": {
+    "source": "trusted XMCL-approved Java 21 archive",
+    "sha256": "REQUIRED_64_HEX_SHA256"
+  }
+}

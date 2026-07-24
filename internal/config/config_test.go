@@ -74,6 +74,14 @@ func TestLoadRequiresSafeSharedNodeRegion(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresImmutableXMCLRuntimeImage(t *testing.T) {
+	setCanonicalEnvironment(t)
+	t.Setenv("XMCL_CONTAINER_IMAGE", "minecraft:latest")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "XMCL_CONTAINER_IMAGE") {
+		t.Fatalf("mutable container image was unexpectedly accepted: %v", err)
+	}
+}
+
 func setCanonicalEnvironment(t *testing.T) {
 	t.Helper()
 	for name, value := range map[string]string{
@@ -90,7 +98,7 @@ func setCanonicalEnvironment(t *testing.T) {
 		"XMCL_VULTR_OBJECT_STORAGE_CREDENTIAL_URL": "",
 		"XMCL_WORKSPACE_ROOT":                      "/var/lib/xmcl-shared/workspaces",
 		"XMCL_STATE_ROOT":                          "/var/lib/xmcl-shared/state",
-		"XMCL_CONTAINER_IMAGE":                     "minecraft:test",
+		"XMCL_CONTAINER_IMAGE":                     "ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"XMCL_RCON_STOP_TIMEOUT_SECONDS":           "60",
 		"XMCL_TOTAL_MEMORY_MIB":                    "1024",
 		"XMCL_TOTAL_SHARED_CPU":                    "2",

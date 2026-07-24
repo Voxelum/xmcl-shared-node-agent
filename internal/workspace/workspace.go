@@ -43,6 +43,56 @@ type Transfer interface {
 	Upload(context.Context, controlplane.WorkspaceGrant, string, io.Reader, int64, string) (TransferResult, error)
 }
 
+func (m *Manager) restoreInitialRuntimeContent(ctx context.Context, command controlplane.Command, workspacePath string) (string, error) {
+	content := *command.RuntimeContent
+	if err := validateRuntimeContent(content, command); err != nil {
+		return "", err
+	}
+	response, err := m.grants.RestoreWorkspaceGrants(ctx, command, "blobs", []string{content.Key})
+	if err != nil {
+		return "", fmt.Errorf("request initial runtime content grant: %w", err)
+	}
+	grant, err := oneGrant(response, content.Key, "GET")
+	if err != nil {
+		return "", err
+	}
+	stagingBase := filepath.Join(m.root, ".staging", command.ServiceID+"-"+command.CommandID)
+	if err := os.RemoveAll(stagingBase); err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(stagingBase)
+	if err := os.MkdirAll(stagingBase, 0o750); err != nil {
+		return "", err
+	}
+	archivePath := filepath.Join(stagingBase, "runtime-content.tar.zst")
+	result, err := m.downloadArchive(ctx, grant, content, archivePath)
+	if err != nil {
+		return "", err
+	}
+	if result.Size != content.CompressedSize || result.SHA256 != content.SHA256 {
+		return "", errors.New("initial runtime content does not match selected descriptor")
+	}
+	extractionRoot := filepath.Join(stagingBase, "workspace")
+	if _, err := extractArchive(archivePath, extractionRoot, content, map[string]struct{}{}, workspaceLimit(command)); err != nil {
+		return "", err
+	}
+	if err := m.activateStaging(ctx, command, extractionRoot, workspacePath); err != nil {
+		return "", err
+	}
+	manifest := controlplane.WorkspaceManifest{
+		SchemaVersion: 2,
+		ServiceID:     command.ServiceID,
+		AssignmentID:  command.AssignmentID,
+		Revision:      0,
+		Content:       &content,
+		LogicalSize:   content.LogicalSize,
+	}
+	m.mu.Lock()
+	m.restored[command.ServiceID] = manifest
+	m.mu.Unlock()
+	return workspacePath, nil
+}
+
 type TransferResult struct {
 	Size   int64
 	SHA256 string
@@ -113,6 +163,14 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 		return "", err
 	}
 	if command.Workspace.Revision == 0 {
+		if command.RuntimeContent != nil {
+			path, err := m.restoreInitialRuntimeContent(ctx, command, workspacePath)
+			if err != nil {
+				return "", err
+			}
+			success = true
+			return path, nil
+		}
 		path, err := m.activateEmptyWorkspace(command, workspacePath)
 		if err != nil {
 			return "", err
@@ -161,6 +219,13 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 	}
 	if err := validateManifest(manifest, command); err != nil {
 		return "", err
+	}
+	if command.RuntimeContent != nil {
+		if err := validateRuntimeContent(*command.RuntimeContent, command); err != nil {
+			return "", err
+		}
+		manifest.Content = command.RuntimeContent
+		manifest.LogicalSize = logicalSize(manifestDescriptors(manifest))
 	}
 
 	descriptors := manifestDescriptors(manifest)
@@ -286,6 +351,9 @@ func (m *Manager) Sync(ctx context.Context, command controlplane.Command) (contr
 		return controlplane.SyncResult{}, err
 	}
 	for _, archive := range archives {
+		if archive.path == "" {
+			continue
+		}
 		grant, upload := uploadGrants[archive.descriptor.Key]
 		if !upload {
 			continue // The control plane proved this immutable descriptor is published.
@@ -330,13 +398,21 @@ func (m *Manager) Sync(ctx context.Context, command controlplane.Command) (contr
 func (m *Manager) buildManifest(stagingBase, prefix string, command controlplane.Command, revision int64, files []workspaceFile, createdAt time.Time, previous controlplane.WorkspaceManifest) (controlplane.WorkspaceManifest, []archive, error) {
 	layers := classify(files)
 	var archives []archive
-	content, err := buildArchive(filepath.Join(stagingBase, "content.tar.zst"), layers.content)
-	if err != nil {
-		return controlplane.WorkspaceManifest{}, nil, err
-	}
-	content.descriptor.Key = prefix + "/content/" + content.descriptor.SHA256 + ".tar.zst"
-	if previous.Content != nil && sameArchive(*previous.Content, content.descriptor) {
+	var content archive
+	var err error
+	if previous.Content != nil && isCompilerContent(*previous.Content) {
+		// A compiler-selected layer is immutable. User process changes must never
+		// republish or replace it during world/config sync.
 		content.descriptor = *previous.Content
+	} else {
+		content, err = buildArchive(filepath.Join(stagingBase, "content.tar.zst"), layers.content)
+		if err != nil {
+			return controlplane.WorkspaceManifest{}, nil, err
+		}
+		content.descriptor.Key = prefix + "/content/" + content.descriptor.SHA256 + ".tar.zst"
+		if previous.Content != nil && sameArchive(*previous.Content, content.descriptor) {
+			content.descriptor = *previous.Content
+		}
 	}
 	archives = append(archives, content)
 	var config *archive
@@ -740,6 +816,45 @@ func extractArchive(path, root string, descriptor controlplane.WorkspaceBlob, se
 		return 0, errors.New("workspace archive does not match manifest path mapping")
 	}
 	return total, nil
+}
+
+func validateRuntimeContent(content controlplane.WorkspaceBlob, command controlplane.Command) error {
+	prefix, err := workspacePrefix(command)
+	if err != nil {
+		return err
+	}
+	if !validDescriptor(content) || !strings.HasPrefix(
+		content.Key,
+		prefix+"/compiler-content/",
+	) || !strings.HasSuffix(content.Key, ".tar.zst") ||
+		!allPaths(content.Paths, isContentPath) ||
+		!containsPath(content.Paths, ".xmcl/runtime.json") ||
+		!containsPath(content.Paths, ".xmcl/launch.sh") {
+		return errors.New("command runtime content is not a valid compiler-owned content layer")
+	}
+	return nil
+}
+
+func isCompilerContent(content controlplane.WorkspaceBlob) bool {
+	return strings.Contains(content.Key, "/compiler-content/") &&
+		strings.HasSuffix(content.Key, ".tar.zst")
+}
+
+func containsPath(paths []string, wanted string) bool {
+	for _, path := range paths {
+		if path == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func logicalSize(descriptors []controlplane.WorkspaceBlob) int64 {
+	var total int64
+	for _, descriptor := range descriptors {
+		total += descriptor.LogicalSize
+	}
+	return total
 }
 
 func validateManifest(manifest controlplane.WorkspaceManifest, command controlplane.Command) error {

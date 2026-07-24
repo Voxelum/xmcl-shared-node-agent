@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/agent"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
+	runtimecontract "github.com/voxelum/xmcl-shared-node-agent/internal/runtime"
 )
 
 const cpuPeriod int64 = 100000
@@ -39,6 +41,9 @@ type Runtime struct {
 }
 
 func New(image string, stopTimeout time.Duration) (*Runtime, error) {
+	if err := ValidateRuntimeImage(image); err != nil {
+		return nil, err
+	}
 	api, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("create Docker client: %w", err)
@@ -103,6 +108,12 @@ func (r *Runtime) Running(ctx context.Context) ([]agent.RunningService, error) {
 }
 
 func (r *Runtime) Start(ctx context.Context, command controlplane.Command, workspacePath string) error {
+	if command.RuntimeContent == nil {
+		return errors.New("shared modded runtime start requires compiler-selected runtime content")
+	}
+	if _, err := runtimecontract.ValidateWorkspace(workspacePath, command.RuntimeContent.SHA256); err != nil {
+		return fmt.Errorf("validate compiler runtime descriptor: %w", err)
+	}
 	name, err := containerName(command.ServiceID)
 	if err != nil {
 		return err
@@ -184,7 +195,19 @@ func (r *Runtime) Stop(ctx context.Context, command controlplane.Command) error 
 	}
 }
 
+// ValidateRuntimeImage prevents an operator or API caller from replacing the
+// generic launcher with a mutable tag or a dynamically downloading image.
+func ValidateRuntimeImage(image string) error {
+	if !regexp.MustCompile(`^ghcr\.io/voxelum/xmcl-shared-minecraft-runtime@sha256:[a-f0-9]{64}$`).MatchString(image) {
+		return errors.New("container image must be the immutable XMCL shared Minecraft runtime digest")
+	}
+	return nil
+}
+
 func BuildCreateRequest(command controlplane.Command, workspacePath, image string) (*container.Config, *container.HostConfig, error) {
+	if err := ValidateRuntimeImage(image); err != nil {
+		return nil, nil, err
+	}
 	if command.Resources.MemoryMiB < 1 || command.Resources.SharedCPU < 1 ||
 		command.Resources.BurstCPU < command.Resources.SharedCPU || command.Resources.WorkspaceGiB < 1 {
 		return nil, nil, errors.New("invalid container resource limits")
@@ -192,15 +215,24 @@ func BuildCreateRequest(command controlplane.Command, workspacePath, image strin
 	if filepath.IsAbs(workspacePath) == false {
 		return nil, nil, errors.New("workspace mount source must be an absolute path")
 	}
+	if command.RuntimeContent == nil || command.RuntimeContent.SHA256 == "" ||
+		command.RuntimeContent.Key == "" || len(command.RuntimeContent.Paths) == 0 {
+		return nil, nil, errors.New("container start requires compiler-selected immutable runtime content")
+	}
+	if !command.EULAAccepted {
+		return nil, nil, errors.New("container start requires server-side EULA acceptance")
+	}
 	memory := command.Resources.MemoryMiB * 1024 * 1024
 	pids := int64(256)
 	gamePort := nat.Port("25565/tcp")
 	if command.Connection == nil || !command.Connection.Valid() {
 		return nil, nil, errors.New("container start requires a control-plane assigned public connection")
 	}
+
 	config := &container.Config{
 		Image: image,
 		User:  "1000:1000",
+		Env:   fixedRuntimeEnvironment(command),
 		ExposedPorts: nat.PortSet{
 			gamePort: struct{}{},
 		},
@@ -238,6 +270,13 @@ func BuildCreateRequest(command controlplane.Command, workspacePath, image strin
 	}
 
 	return config, hostConfig, nil
+}
+
+func fixedRuntimeEnvironment(command controlplane.Command) []string {
+	if command.EULAAccepted {
+		return []string{"XMCL_EULA_ACCEPTED=true"}
+	}
+	return nil
 }
 
 func resourcesFromLabels(labels map[string]string) (controlplane.Resources, error) {

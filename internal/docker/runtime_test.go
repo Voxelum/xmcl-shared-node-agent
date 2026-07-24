@@ -12,8 +12,15 @@ func TestBuildCreateRequestHardensContainer(t *testing.T) {
 		ServiceID: "service_1", AssignmentID: "assignment_1",
 		Resources:  controlplane.Resources{MemoryMiB: 512, SharedCPU: 1, BurstCPU: 2, WorkspaceGiB: 4},
 		Connection: &controlplane.Connection{Host: "public-node.example", HostPort: 25572},
+		RuntimeContent: &controlplane.WorkspaceBlob{
+			Key:    "shared-hosting/account_1/service_1/compiler-content/content.tar.zst",
+			SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Paths:  []string{".xmcl/runtime.json", ".xmcl/launch.sh"},
+		},
+		EULAAccepted: true,
 	}
-	config, host, err := BuildCreateRequest(command, filepath.Join(t.TempDir(), "service_1"), "minecraft:test")
+	image := "ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	config, host, err := BuildCreateRequest(command, filepath.Join(t.TempDir(), "service_1"), image)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +33,9 @@ func TestBuildCreateRequestHardensContainer(t *testing.T) {
 	}
 	if len(host.SecurityOpt) != 1 || host.SecurityOpt[0] != "no-new-privileges:true" || host.Resources.PidsLimit == nil {
 		t.Fatalf("security settings missing: %#v", host)
+	}
+	if len(config.Env) != 1 || config.Env[0] != "XMCL_EULA_ACCEPTED=true" {
+		t.Fatalf("runtime received untrusted or missing environment: %#v", config.Env)
 	}
 	if config.Labels[resourceMemoryLabel] != "512" || config.Labels[resourceSharedCPULabel] != "1" ||
 		config.Labels[resourceWorkspaceLabel] != "4" {
@@ -51,8 +61,42 @@ func TestBuildCreateRequestRejectsMissingAssignedConnection(t *testing.T) {
 	command := controlplane.Command{
 		ServiceID: "service_1", AssignmentID: "assignment_1",
 		Resources: controlplane.Resources{MemoryMiB: 512, SharedCPU: 1, BurstCPU: 2, WorkspaceGiB: 4},
+		RuntimeContent: &controlplane.WorkspaceBlob{
+			Key:    "shared-hosting/account_1/service_1/compiler-content/content.tar.zst",
+			SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Paths:  []string{".xmcl/runtime.json"},
+		},
+	}
+	image := "ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if _, _, err := BuildCreateRequest(command, filepath.Join(t.TempDir(), "service_1"), image); err == nil {
+		t.Fatal("missing assigned public connection was accepted")
+	}
+}
+
+func TestBuildCreateRequestRejectsMutableOrUnselectedRuntime(t *testing.T) {
+	command := controlplane.Command{
+		ServiceID: "service_1", AssignmentID: "assignment_1",
+		Resources:  controlplane.Resources{MemoryMiB: 512, SharedCPU: 1, BurstCPU: 2, WorkspaceGiB: 4},
+		Connection: &controlplane.Connection{Host: "public-node.example", HostPort: 25572},
 	}
 	if _, _, err := BuildCreateRequest(command, filepath.Join(t.TempDir(), "service_1"), "minecraft:test"); err == nil {
-		t.Fatal("missing assigned public connection was accepted")
+		t.Fatal("mutable image was accepted")
+	}
+}
+
+func TestBuildCreateRequestRequiresServerSideEULAAcceptance(t *testing.T) {
+	command := controlplane.Command{
+		ServiceID: "service_1", AssignmentID: "assignment_1",
+		Resources:  controlplane.Resources{MemoryMiB: 512, SharedCPU: 1, BurstCPU: 2, WorkspaceGiB: 4},
+		Connection: &controlplane.Connection{Host: "public-node.example", HostPort: 25572},
+		RuntimeContent: &controlplane.WorkspaceBlob{
+			Key:    "shared-hosting/account_1/service_1/compiler-content/content.tar.zst",
+			SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Paths:  []string{".xmcl/runtime.json", ".xmcl/launch.sh"},
+		},
+	}
+	image := "ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if _, _, err := BuildCreateRequest(command, filepath.Join(t.TempDir(), "service_1"), image); err == nil {
+		t.Fatal("missing server-side EULA acceptance was accepted")
 	}
 }

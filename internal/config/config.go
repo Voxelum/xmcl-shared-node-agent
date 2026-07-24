@@ -34,6 +34,7 @@ type Config struct {
 
 var ingressHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
 var sharedNodeRegionPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
+var runtimeImagePattern = regexp.MustCompile(`^ghcr\.io/voxelum/xmcl-shared-minecraft-runtime@sha256:[a-f0-9]{64}$`)
 
 func Load() (Config, error) {
 	required := func(name string) (string, error) {
@@ -84,6 +85,9 @@ func Load() (Config, error) {
 	}
 	if !sharedNodeRegionPattern.MatchString(c.Region) {
 		return Config{}, fmt.Errorf("XMCL_SHARED_NODE_REGION must be a provider region identifier")
+	}
+	if !runtimeImagePattern.MatchString(c.ContainerImage) {
+		return Config{}, fmt.Errorf("XMCL_CONTAINER_IMAGE must be an immutable XMCL shared Minecraft runtime digest")
 	}
 	for _, name := range []string{
 		"XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY",
