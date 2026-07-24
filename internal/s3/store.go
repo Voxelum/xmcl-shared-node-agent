@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/voxelum/xmcl-shared-node-agent/internal/objectstore"
 )
 
 type Store struct {
@@ -51,6 +53,17 @@ func (s *Store) Download(ctx context.Context, key string) ([]byte, error) {
 	return data, nil
 }
 
+func (s *Store) Exists(ctx context.Context, key string) (bool, error) {
+	_, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	if err == nil {
+		return true, nil
+	}
+	if isNotFound(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("stat S3 object: %w", err)
+}
+
 func (s *Store) Upload(ctx context.Context, key string, data []byte, contentType string) error {
 	_, err := s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
 		ContentType: contentType,
@@ -59,4 +72,27 @@ func (s *Store) Upload(ctx context.Context, key string, data []byte, contentType
 		return fmt.Errorf("upload S3 object: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) List(ctx context.Context, prefix string) ([]objectstore.ObjectInfo, error) {
+	objects := make([]objectstore.ObjectInfo, 0)
+	for object := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if object.Err != nil {
+			return nil, fmt.Errorf("list S3 objects: %w", object.Err)
+		}
+		objects = append(objects, objectstore.ObjectInfo{Key: object.Key, LastModified: object.LastModified, Size: object.Size})
+	}
+	return objects, nil
+}
+
+func (s *Store) Delete(ctx context.Context, key string) error {
+	if err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil {
+		return fmt.Errorf("delete S3 object: %w", err)
+	}
+	return nil
+}
+
+func isNotFound(err error) bool {
+	code := minio.ToErrorResponse(err).Code
+	return code == "NoSuchKey" || code == "NoSuchObject" || strings.EqualFold(code, "NotFound")
 }

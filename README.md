@@ -17,6 +17,9 @@ and syncs immutable revisions before acknowledging a stop.
   called.
 - Sync uploads every object before publishing `manifest.json`; a failed upload
   leaves the local workspace and assignment intact.
+- Revisions use `revisions/<revision>/files/...`; only a matching
+  `manifest.json` makes one restorable. Upload retries are idempotent, and
+  stale revisions without a manifest can be safely cleaned after 24 hours.
 - Containers run as UID/GID `1000`, have a read-only root filesystem, one
   writable `/data` bind mount, no capabilities, no-new-privileges, a PID
   limit, a memory hard limit, disabled swap, and CPU controls.
@@ -43,11 +46,20 @@ XMCL_TOTAL_SHARED_CPU
 XMCL_TOTAL_WORKSPACE_GIB
 XMCL_QUOTA_MOUNT_PATH
 XMCL_QUOTA_PROJECT_BASE
+XMCL_METRICS_ADDR=127.0.0.1:9464
 ```
 
 `XMCL_QUOTA_MOUNT_PATH` must be an XFS filesystem mounted with project quotas.
 The agent validates `xfs_quota` at startup and fails closed when hard workspace
 quotas are unavailable.
+
+## Workspace storage operations
+
+See [`deploy/vultr/workspace-storage.md`](deploy/vultr/workspace-storage.md)
+for private-bucket provisioning, least-privilege credential rotation,
+incomplete-upload cleanup, historical retention, and billing metrics. The
+metrics listener must remain bound to loopback or another private monitoring
+network.
 
 ## Control-plane transport
 

@@ -6,10 +6,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
+	"github.com/voxelum/xmcl-shared-node-agent/internal/objectstore"
 )
 
 type memoryObjects struct {
@@ -17,6 +20,7 @@ type memoryObjects struct {
 	objects  map[string][]byte
 	failPut  bool
 	uploaded []string
+	modified map[string]time.Time
 }
 
 func (s *memoryObjects) Download(_ context.Context, key string) ([]byte, error) {
@@ -29,6 +33,13 @@ func (s *memoryObjects) Download(_ context.Context, key string) ([]byte, error) 
 	return append([]byte(nil), data...), nil
 }
 
+func (s *memoryObjects) Exists(_ context.Context, key string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.objects[key]
+	return ok, nil
+}
+
 func (s *memoryObjects) Upload(_ context.Context, key string, data []byte, _ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -37,6 +48,30 @@ func (s *memoryObjects) Upload(_ context.Context, key string, data []byte, _ str
 	}
 	s.objects[key] = append([]byte(nil), data...)
 	s.uploaded = append(s.uploaded, key)
+	if s.modified == nil {
+		s.modified = make(map[string]time.Time)
+	}
+	s.modified[key] = time.Now()
+	return nil
+}
+
+func (s *memoryObjects) List(_ context.Context, prefix string) ([]objectstore.ObjectInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	objects := make([]objectstore.ObjectInfo, 0)
+	for key := range s.objects {
+		if strings.HasPrefix(key, prefix) {
+			objects = append(objects, objectstore.ObjectInfo{Key: key, LastModified: s.modified[key], Size: int64(len(s.objects[key]))})
+		}
+	}
+	return objects, nil
+}
+
+func (s *memoryObjects) Delete(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.objects, key)
+	delete(s.modified, key)
 	return nil
 }
 
@@ -67,7 +102,7 @@ func TestRestoreRejectsTraversalManifestPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	objects := &memoryObjects{objects: map[string][]byte{
-		revisionKey(command.Workspace.ObjectPrefix, command.Workspace.Revision, "manifest.json"): data,
+		manifestKey(command.Workspace.ObjectPrefix, command.Workspace.Revision): data,
 	}}
 	manager := New(t.TempDir(), objects, testQuota{})
 	if _, err := manager.Restore(context.Background(), command); err == nil {
@@ -88,8 +123,8 @@ func TestRestoreHashMismatchDoesNotActivateWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	objects := &memoryObjects{objects: map[string][]byte{
-		revisionKey(command.Workspace.ObjectPrefix, command.Workspace.Revision, "manifest.json"):   data,
-		revisionKey(command.Workspace.ObjectPrefix, command.Workspace.Revision, "world/level.dat"): []byte("bad"),
+		manifestKey(command.Workspace.ObjectPrefix, command.Workspace.Revision):                data,
+		fileKey(command.Workspace.ObjectPrefix, command.Workspace.Revision, "world/level.dat"): []byte("bad"),
 	}}
 	manager := New(t.TempDir(), objects, testQuota{})
 	if _, err := manager.Restore(context.Background(), command); err == nil {
@@ -116,7 +151,145 @@ func TestSyncPublishesManifestLast(t *testing.T) {
 	if _, err := manager.Sync(context.Background(), command); err != nil {
 		t.Fatal(err)
 	}
-	if len(objects.uploaded) != 2 || objects.uploaded[1] != revisionKey(command.Workspace.ObjectPrefix, 3, "manifest.json") {
+	if len(objects.uploaded) != 2 || objects.uploaded[0] != fileKey(command.Workspace.ObjectPrefix, 3, "world/level.dat") ||
+		objects.uploaded[1] != manifestKey(command.Workspace.ObjectPrefix, 3) {
 		t.Fatalf("manifest must be published last, got %v", objects.uploaded)
+	}
+	if err := manager.RefreshObjectBytes(context.Background(), command.Workspace.ObjectPrefix); err != nil {
+		t.Fatal(err)
+	}
+	metrics := manager.Metrics()
+	if metrics.LogicalBytes != int64(len("world")) || metrics.SyncBytes <= metrics.LogicalBytes || metrics.ActualObjectBytes != metrics.SyncBytes {
+		t.Fatalf("unexpected storage metrics: %#v", metrics)
+	}
+}
+
+func TestRestoreRequiresManifestAndExpectedManifestHash(t *testing.T) {
+	command := restoreCommand()
+	file := []byte("world")
+	objects := &memoryObjects{objects: map[string][]byte{
+		fileKey(command.Workspace.ObjectPrefix, command.Workspace.Revision, "world/level.dat"): file,
+	}}
+	manager := New(t.TempDir(), objects, testQuota{})
+	if _, err := manager.Restore(context.Background(), command); err == nil {
+		t.Fatal("partial revision without a manifest must not restore")
+	}
+	manifest := Manifest{
+		SchemaVersion: 1, ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
+		Revision: command.Workspace.Revision, SizeBytes: int64(len(file)),
+		Files: []File{{Path: "world/level.dat", SizeBytes: int64(len(file)), SHA256: digest(file)}},
+	}
+	manifest.SHA256 = aggregateHash(manifest.Files)
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects.objects[manifestKey(command.Workspace.ObjectPrefix, command.Workspace.Revision)] = data
+	command.Workspace.SHA256 = digest([]byte("wrong"))
+	if _, err := manager.Restore(context.Background(), command); err == nil {
+		t.Fatal("manifest hash mismatch must block restore")
+	}
+}
+
+func TestSyncIsIdempotentForCompletedRevision(t *testing.T) {
+	command := restoreCommand()
+	command.Kind = controlplane.StopAndSync
+	root := t.TempDir()
+	objects := &memoryObjects{objects: make(map[string][]byte)}
+	manager := New(root, objects, testQuota{})
+	path, err := manager.Path(command.ServiceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "server.properties"), []byte("motd=test"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.Sync(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploads := len(objects.uploaded)
+	second, err := manager.Sync(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || len(objects.uploaded) != uploads {
+		t.Fatalf("completed revision was uploaded again: first=%#v second=%#v uploads=%d", first, second, len(objects.uploaded))
+	}
+}
+
+func TestCleanupIncompletePreservesCompleteAndCurrentRevisions(t *testing.T) {
+	command := restoreCommand()
+	prefix := command.Workspace.ObjectPrefix
+	stale := time.Now().Add(-incompleteRevisionGrace - time.Hour)
+	objects := &memoryObjects{
+		objects: map[string][]byte{
+			fileKey(prefix, 1, "partial.dat"):     []byte("partial"),
+			manifestKey(prefix, 2):                []byte("complete"),
+			fileKey(prefix, 3, "current-partial"): []byte("current"),
+		},
+		modified: map[string]time.Time{
+			fileKey(prefix, 1, "partial.dat"):     stale,
+			manifestKey(prefix, 2):                stale,
+			fileKey(prefix, 3, "current-partial"): stale,
+		},
+	}
+
+	manager := New(t.TempDir(), objects, testQuota{})
+	if err := manager.CleanupIncomplete(context.Background(), prefix, 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := objects.objects[fileKey(prefix, 1, "partial.dat")]; exists {
+		t.Fatal("stale incomplete revision was retained")
+	}
+	if _, exists := objects.objects[manifestKey(prefix, 2)]; !exists {
+		t.Fatal("complete historical revision was deleted")
+	}
+	if _, exists := objects.objects[fileKey(prefix, 3, "current-partial")]; !exists {
+		t.Fatal("current revision was deleted")
+	}
+}
+
+func TestFailedUploadLeavesPriorRevisionRestorable(t *testing.T) {
+	command := restoreCommand()
+	file := []byte("previous-world")
+	manifest := Manifest{
+		SchemaVersion: 1, ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
+		Revision: command.Workspace.Revision, SizeBytes: int64(len(file)),
+		Files: []File{{Path: "world/level.dat", SizeBytes: int64(len(file)), SHA256: digest(file)}},
+	}
+	manifest.SHA256 = aggregateHash(manifest.Files)
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := &memoryObjects{objects: map[string][]byte{
+		manifestKey(command.Workspace.ObjectPrefix, command.Workspace.Revision):                manifestData,
+		fileKey(command.Workspace.ObjectPrefix, command.Workspace.Revision, "world/level.dat"): file,
+	}}
+	manager := New(t.TempDir(), objects, testQuota{})
+	manager.sleep = func(context.Context, time.Duration) error { return nil }
+	path, err := manager.Path(command.ServiceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "new-world.dat"), []byte("new"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	command.Kind = controlplane.StopAndSync
+	objects.failPut = true
+	if _, err := manager.Sync(context.Background(), command); err == nil {
+		t.Fatal("expected failed upload")
+	}
+	objects.failPut = false
+	command.Kind = controlplane.RestoreAndStart
+	if _, err := manager.Restore(context.Background(), command); err != nil {
+		t.Fatalf("prior complete revision stopped being restorable: %v", err)
 	}
 }

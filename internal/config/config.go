@@ -26,6 +26,7 @@ type Config struct {
 	TotalWorkspaceGiB      int64
 	QuotaMountPath         string
 	QuotaProjectBase       uint32
+	MetricsAddr            string
 }
 
 func Load() (Config, error) {
@@ -104,5 +105,9 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("XMCL_QUOTA_PROJECT_BASE must be an unsigned 32-bit integer")
 	}
 	c.QuotaProjectBase = uint32(projectBase)
+	c.MetricsAddr = os.Getenv("XMCL_METRICS_ADDR")
+	if c.MetricsAddr == "" {
+		c.MetricsAddr = "127.0.0.1:9464"
+	}
 	return c, nil
 }
