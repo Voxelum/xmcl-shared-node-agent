@@ -1,0 +1,7 @@
+# Go build outputs
+xmcl-shared-node-agent
+xmcl-shared-node-agent.exe
+
+# Local state and secrets
+.env
+agent-state/

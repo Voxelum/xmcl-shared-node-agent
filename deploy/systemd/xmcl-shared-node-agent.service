@@ -1,0 +1,25 @@
+[Unit]
+Description=XMCL shared-hosting node agent
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=xmcl-agent
+Group=xmcl-agent
+SupplementaryGroups=docker
+EnvironmentFile=/etc/xmcl-shared-node-agent.env
+ExecStart=/usr/local/bin/xmcl-shared-node-agent
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/xmcl-shared
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
