@@ -2,8 +2,8 @@
 
 The shared-node agent is the privileged, Go-based execution component for one
 Vultr shared-hosting compute node. It restores verified Minecraft workspaces
-from private S3-compatible object storage, runs a hardened Docker container,
-and syncs immutable revisions before acknowledging a stop.
+through short-lived command-scoped S3 SigV4 URL grants, runs a hardened Docker
+container, and syncs immutable revisions before acknowledging a stop.
 
 ## Safety properties
 
@@ -12,14 +12,15 @@ and syncs immutable revisions before acknowledging a stop.
   container.
 - Per-service file locks prevent concurrent agents from operating on the same
   local workspace.
-- Restore rejects traversal paths, mismatched service/assignment/revision,
-  aggregate manifest mismatches, and per-file hash mismatches before Docker is
-  called.
-- Sync uploads every object before publishing `manifest.json`; a failed upload
-  leaves the local workspace and assignment intact.
-- Revisions use `revisions/<revision>/files/...`; only a matching
-  `manifest.json` makes one restorable. Upload retries are idempotent, and
-  stale revisions without a manifest can be safely cleaned after 24 hours.
+- Restore accepts only granted HTTPS URLs for the configured Vultr storage host.
+  It rejects redirects, foreign URLs, traversal, duplicate archive entries,
+  symlinks, decompression bombs, invalid path mappings, and hash/size failures
+  before replacing the active workspace.
+- Sync creates deterministic streaming `.tar.zst` mutation layers, hashes while
+  streaming, obtains PUT URLs only for validated exact objects, and publishes
+  `manifest.json` last with an immutable-write precondition.
+- The agent has no S3 access key, secret key, List, Delete, bucket-stat, or
+  arbitrary-key operation. It never stores URL grants.
 - Containers run as UID/GID `1000`, have a read-only root filesystem, one
   writable `/data` bind mount, no capabilities, no-new-privileges, a PID
   limit, a memory hard limit, disabled swap, and CPU controls.
@@ -31,13 +32,13 @@ Create `/etc/xmcl-shared-node-agent.env` with mode `0600`, owned by
 
 ```text
 XMCL_SHARED_NODE_ID
+XMCL_SHARED_NODE_REGION=sgp
 XMCL_CONTROL_PLANE_URL
 XMCL_CONTROL_PLANE_CREDENTIAL
-XMCL_VULTR_OBJECT_STORAGE_ENDPOINT
-XMCL_VULTR_OBJECT_STORAGE_REGION
+XMCL_SHARED_NODE_INGRESS_HOST
+XMCL_VULTR_OBJECT_STORAGE_ENDPOINT=https://sgp1.vultrobjects.com
+XMCL_VULTR_OBJECT_STORAGE_REGION=sgp
 XMCL_VULTR_OBJECT_STORAGE_BUCKET
-XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY
-XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY
 XMCL_WORKSPACE_ROOT
 XMCL_STATE_ROOT
 XMCL_CONTAINER_IMAGE
@@ -50,6 +51,30 @@ XMCL_QUOTA_PROJECT_BASE
 XMCL_METRICS_ADDR=127.0.0.1:9464
 ```
 
+`XMCL_VULTR_OBJECT_STORAGE_ENDPOINT` must be the Vultr HTTPS origin and
+`XMCL_VULTR_OBJECT_STORAGE_BUCKET` is used only to verify a grant's path-style
+bucket/key association. The control plane gives the agent no storage
+credentials. For each active v2 command lease it signs a control-plane request
+for one of `restore`, `sync`, or `publish`; the response contains only exact
+short-lived GET or PUT URLs. The agent rejects
+`XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY`,
+`XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY`, and
+`XMCL_VULTR_OBJECT_STORAGE_CREDENTIAL_URL` if configured, including in
+development.
+
+`XMCL_SHARED_NODE_INGRESS_HOST` is the provisioner-owned, reachable public DNS
+name or IPv4 address used for service connections. It must be supplied in the
+root-owned node environment by the trusted provisioning workflow (for example,
+from the assigned Vultr instance address). The agent does not derive it from a
+public-IP discovery service, DNS guess, or control-plane URL; startup fails if
+it is absent or malformed.
+
+`XMCL_SHARED_NODE_REGION` is written by the trusted cloud-init configuration
+from the control plane's `VULTR_SHARED_NODE_REGION_ID`; operators do not set it
+manually. The current shared pool is Singapore (`sgp`). A future multi-region
+product needs explicit region selection and a cross-region data policy; it is
+out of scope.
+
 `XMCL_QUOTA_MOUNT_PATH` must be an XFS filesystem mounted with project quotas.
 Provision the root-owned `/usr/local/libexec/xmcl-quota-helper` with mode
 `4750`, group `xmcl-agent`, and a root-owned mode-`0600`
@@ -61,20 +86,32 @@ unavailable.
 ## Workspace storage operations
 
 See [`deploy/vultr/workspace-storage.md`](deploy/vultr/workspace-storage.md)
-for private-bucket provisioning, least-privilege credential rotation,
-incomplete-upload cleanup, historical retention, and billing metrics. The
-metrics listener must remain bound to loopback or another private monitoring
-network.
+for the v2 layout, signer-only bucket policy, retention, and the required
+staging validation sequence. The metrics listener must remain bound to loopback
+or another private monitoring network.
 
 ## Control-plane transport
 
 The binary uses an outbound HTTPS long-poll client. Bootstrap registration
 exchanges `XMCL_CONTROL_PLANE_CREDENTIAL` for an atomically persisted,
-mode-`0600` short-lived node credential. Every request has the required
+mode-`0600` short-lived node credential. On restart it reuses that credential
+instead of enrolling again. Only a control-plane `401` or `403` invalidates it;
+the agent removes the rejected credential and enrolls again. Every request has the required
 timestamp, nonce, body hash, and HMAC signature; no control-plane port is
 opened on a compute node. It sends a heartbeat immediately after registration
 and on a fixed cadence, retrying transient transport failures with bounded
 backoff.
+
+The existing heartbeat remains the signed v1 JSON contract containing ready/draining state,
+remaining allocatable memory/CPU/workspace capacity derived from the managed
+containers, agent version, and the configured ingress host. Empty heartbeat
+bodies are not supported.
+
+Restore commands must include `connection.host` and numeric
+`connection.hostPort`. The control plane reserves that host port durably before
+dispatch; the agent rejects commands without it and never derives a port from
+the assignment ID. After a healthy start it reports only
+`endpoint: {host, port}` to confirm the assigned public endpoint.
 
 ## Install
 

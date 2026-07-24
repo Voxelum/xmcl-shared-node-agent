@@ -2,8 +2,6 @@ package docker
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -25,6 +23,13 @@ import (
 
 const cpuPeriod int64 = 100000
 const privateNetwork = "xmcl-shared-private"
+
+const (
+	resourceMemoryLabel    = "xmcl.memory-mib"
+	resourceSharedCPULabel = "xmcl.shared-cpu"
+	resourceBurstCPULabel  = "xmcl.burst-cpu"
+	resourceWorkspaceLabel = "xmcl.workspace-gib"
+)
 
 type Runtime struct {
 	client      *client.Client
@@ -86,7 +91,13 @@ func (r *Runtime) Running(ctx context.Context) ([]agent.RunningService, error) {
 		if inspect.HostConfig.Privileged || hasDockerSocketMount(inspect) {
 			return nil, fmt.Errorf("managed container %q violates runtime isolation", summary.ID)
 		}
-		running = append(running, agent.RunningService{ServiceID: serviceID, AssignmentID: assignmentID})
+		resources, err := resourcesFromLabels(summary.Labels)
+		if err != nil {
+			return nil, fmt.Errorf("managed container %q has invalid capacity labels: %w", summary.ID, err)
+		}
+		running = append(running, agent.RunningService{
+			ServiceID: serviceID, AssignmentID: assignmentID, Resources: resources,
+		})
 	}
 	return running, nil
 }
@@ -184,7 +195,9 @@ func BuildCreateRequest(command controlplane.Command, workspacePath, image strin
 	memory := command.Resources.MemoryMiB * 1024 * 1024
 	pids := int64(256)
 	gamePort := nat.Port("25565/tcp")
-	hostPort := deterministicHostPort(command.AssignmentID)
+	if command.Connection == nil || !command.Connection.Valid() {
+		return nil, nil, errors.New("container start requires a control-plane assigned public connection")
+	}
 	config := &container.Config{
 		Image: image,
 		User:  "1000:1000",
@@ -192,11 +205,16 @@ func BuildCreateRequest(command controlplane.Command, workspacePath, image strin
 			gamePort: struct{}{},
 		},
 		Labels: map[string]string{
-			"xmcl.service-id":    command.ServiceID,
-			"xmcl.assignment-id": command.AssignmentID,
-			"xmcl.managed":       "true",
+			"xmcl.service-id":      command.ServiceID,
+			"xmcl.assignment-id":   command.AssignmentID,
+			"xmcl.managed":         "true",
+			resourceMemoryLabel:    strconv.FormatInt(command.Resources.MemoryMiB, 10),
+			resourceSharedCPULabel: strconv.FormatInt(command.Resources.SharedCPU, 10),
+			resourceBurstCPULabel:  strconv.FormatInt(command.Resources.BurstCPU, 10),
+			resourceWorkspaceLabel: strconv.FormatInt(command.Resources.WorkspaceGiB, 10),
 		},
 	}
+
 	hostConfig := &container.HostConfig{
 		Resources: container.Resources{
 			Memory:     memory,
@@ -212,7 +230,7 @@ func BuildCreateRequest(command controlplane.Command, workspacePath, image strin
 		CapDrop:        []string{"ALL"},
 		NetworkMode:    container.NetworkMode(privateNetwork),
 		PortBindings: nat.PortMap{
-			gamePort: []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: strconv.Itoa(hostPort)}},
+			gamePort: []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: strconv.Itoa(command.Connection.HostPort)}},
 		},
 		Mounts: []mount.Mount{{
 			Type: mount.TypeBind, Source: workspacePath, Target: "/data", ReadOnly: false,
@@ -222,9 +240,36 @@ func BuildCreateRequest(command controlplane.Command, workspacePath, image strin
 	return config, hostConfig, nil
 }
 
-func deterministicHostPort(assignmentID string) int {
-	sum := sha256.Sum256([]byte(assignmentID))
-	return 25565 + int(binary.BigEndian.Uint16(sum[:2])%10000)
+func resourcesFromLabels(labels map[string]string) (controlplane.Resources, error) {
+	parse := func(label string) (int64, error) {
+		value, err := strconv.ParseInt(labels[label], 10, 64)
+		if err != nil || value < 1 {
+			return 0, fmt.Errorf("%s must be a positive integer", label)
+		}
+		return value, nil
+	}
+	memory, err := parse(resourceMemoryLabel)
+	if err != nil {
+		return controlplane.Resources{}, err
+	}
+	sharedCPU, err := parse(resourceSharedCPULabel)
+	if err != nil {
+		return controlplane.Resources{}, err
+	}
+	burstCPU, err := parse(resourceBurstCPULabel)
+	if err != nil {
+		return controlplane.Resources{}, err
+	}
+	workspace, err := parse(resourceWorkspaceLabel)
+	if err != nil {
+		return controlplane.Resources{}, err
+	}
+	if burstCPU < sharedCPU {
+		return controlplane.Resources{}, errors.New("burst CPU is below shared CPU")
+	}
+	return controlplane.Resources{
+		MemoryMiB: memory, SharedCPU: sharedCPU, BurstCPU: burstCPU, WorkspaceGiB: workspace,
+	}, nil
 }
 
 func (r *Runtime) waitHealthy(ctx context.Context, id string) error {

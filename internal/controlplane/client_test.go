@@ -19,13 +19,12 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	t.Parallel()
 
 	const (
-		nodeID       = "node-1"
-		bootstrap    = "bootstrap-secret"
-		credential   = "node-1.initial-secret"
-		rotated      = "node-1.rotated-secret"
-		timestampMS  = "1710000000123"
-		leaseToken   = "lease-token"
-		leaseVersion = "7"
+		nodeID             = "node-1"
+		bootstrap          = "bootstrap-secret"
+		credential         = "node-1.initial-secret"
+		timestampMS        = "1710000000123"
+		leaseToken         = "lease-token"
+		leaseVersion int64 = 7
 	)
 	activeCredential := credential
 	requests := 0
@@ -43,7 +42,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 			if auth != "SharedNode-Bootstrap "+bootstrap {
 				t.Fatalf("register authorization = %q", auth)
 			}
-			if string(body) != `{"nodeId":"node-1","region":"taipei","totalMemoryMiB":2048,"totalSharedCpu":2,"totalWorkspaceGiB":10}` {
+			if string(body) != `{"nodeId":"node-1","region":"sgp","totalMemoryMiB":2048,"totalSharedCpu":2,"totalWorkspaceGiB":10}` {
 				t.Fatalf("register body = %s", body)
 			}
 		} else if auth != "SharedNode "+activeCredential {
@@ -77,27 +76,29 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 		case "/v1/internal/shared-nodes/register":
 			_, _ = w.Write([]byte(`{"nodeId":"node-1","credential":"node-1.initial-secret"}`))
 		case "/v1/internal/shared-nodes/node-1/heartbeat":
-			if len(body) != 0 {
+			if string(body) != `{"contractVersion":1,"status":"ready","capacity":{"freeWorkspaceGiB":8,"allocatableMemoryMiB":1536,"allocatableSharedCpu":1,"activeContainerCount":1},"agentVersion":"test-agent","ingress":{"host":"public-node.example"}}` {
 				t.Fatalf("heartbeat body = %s", body)
 			}
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/v1/internal/shared-nodes/node-1/commands:next":
-			_, _ = w.Write([]byte(`{"command":{"commandId":"command-1","kind":"workspace.restore_and_start","nodeId":"node-1","serviceId":"service-1","assignmentId":"assignment-1"},"leaseToken":"lease-token","leaseGeneration":"7","leaseExpiresAt":"2026-01-01T00:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"command":{"commandId":"command-1","kind":"workspace.restore_and_start","nodeId":"node-1","serviceId":"service-1","assignmentId":"assignment-1","connection":{"host":"public-node.example","hostPort":25572}},"leaseToken":"lease-token","leaseGeneration":7,"leaseExpiresAt":"2026-01-01T00:00:00Z"}`))
 		case "/v1/internal/shared-nodes/node-1/commands/command-1/lease-renew":
-			if string(body) != `{"leaseToken":"lease-token","leaseGeneration":"7","leaseExpiresAt":"2026-01-01T00:00:00Z"}` {
+			if string(body) != `{"leaseToken":"lease-token","leaseGeneration":7}` {
 				t.Fatalf("lease renewal body = %s", body)
 			}
-			activeCredential = rotated
-			_, _ = w.Write([]byte(`{"leaseToken":"new-token","leaseGeneration":"8","leaseExpiresAt":"2026-01-01T00:01:00Z","credential":"node-1.rotated-secret"}`))
+			_, _ = w.Write([]byte(`{"leaseExpiresAt":"2026-01-01T00:01:00Z"}`))
 		case "/v1/internal/shared-nodes/node-1/commands/command-1/ack":
+			if string(body) != `{"leaseToken":"lease-token","leaseGeneration":7}` {
+				t.Fatalf("acknowledgement body = %s", body)
+			}
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/v1/internal/shared-nodes/node-1/assignments/assignment-1/started":
-			if string(body) != `{"serviceId":"service-1"}` {
+			if string(body) != `{"serviceId":"service-1","endpoint":{"host":"public-node.example","port":25572}}` {
 				t.Fatalf("started body = %s", body)
 			}
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/v1/internal/shared-nodes/node-1/assignments/assignment-1/stopped-synced":
-			if string(body) != `{"serviceId":"service-1","revision":3,"sizeBytes":42,"sha256":"abc"}` {
+			if string(body) != `{"serviceId":"service-1","commandId":"command-1","leaseToken":"lease-token","leaseGeneration":7,"revision":3,"sizeBytes":42,"sha256":"abc"}` {
 				t.Fatalf("stopped-synced body = %s", body)
 			}
 			_, _ = w.Write([]byte(`{"ok":true}`))
@@ -111,6 +112,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	client, err := NewClient(ClientOptions{
 		BaseURL:             server.URL,
 		NodeID:              nodeID,
+		Region:              "sgp",
 		BootstrapCredential: bootstrap,
 		CredentialPath:      credentialPath,
 		HTTPClient:          server.Client(),
@@ -124,7 +126,15 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	if err := client.Register(ctx, NodeCapacity{TotalMemoryMiB: 2048, TotalSharedCPU: 2, TotalWorkspaceGiB: 10}); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Heartbeat(ctx, NodeStatus{}); err != nil {
+	if err := client.Heartbeat(ctx, NodeStatus{
+		ContractVersion: SharedNodeContractVersion,
+		Status:          "ready",
+		Capacity: AvailableCapacity{
+			FreeWorkspaceGiB: 8, AllocatableMemoryMiB: 1536, AllocatableSharedCPU: 1, ActiveContainerCount: 1,
+		},
+		AgentVersion: "test-agent",
+		Ingress:      Ingress{Host: "public-node.example"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	command, err := client.Next(ctx, nodeID)
@@ -134,17 +144,26 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	if command.Lease.Token != leaseToken || command.Lease.Generation != leaseVersion {
 		t.Fatalf("command lease = %#v", command.Lease)
 	}
-	if _, err := client.RenewLease(ctx, command.CommandID, command.Lease); err != nil {
+	if command.Connection == nil || command.Connection.Host != "public-node.example" || command.Connection.HostPort != 25572 {
+		t.Fatalf("command connection = %#v", command.Connection)
+	}
+	renewed, err := client.RenewLease(ctx, command.CommandID, command.Lease)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Ack(ctx, command.CommandID, CommandResult{Status: "started"}); err != nil {
+	if renewed.Token != leaseToken || renewed.Generation != leaseVersion || renewed.ExpiresAt != "2026-01-01T00:01:00Z" {
+		t.Fatalf("renewed lease = %#v", renewed)
+	}
+	if err := client.Ack(ctx, command.CommandID, renewed, CommandResult{Status: "started"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.ReportStarted(ctx, command.ServiceID, command.AssignmentID); err != nil {
+	if err := client.ReportStarted(ctx, command.ServiceID, command.AssignmentID, command.Connection.Endpoint()); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.ReportStoppedAndSynced(ctx, SyncResult{
-		ServiceID: command.ServiceID, AssignmentID: command.AssignmentID, Revision: 3, SizeBytes: 42, ManifestSHA: "abc",
+		ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
+		CommandID: command.CommandID, Lease: renewed,
+		Revision: 3, SizeBytes: 42, ManifestSHA: "abc",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +174,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(persisted) != rotated+"\n" {
+	if string(persisted) != credential+"\n" {
 		t.Fatalf("persisted credential = %q", persisted)
 	}
 	if runtime.GOOS != "windows" {
@@ -177,10 +196,10 @@ func TestNewClientLoadsPersistedCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientOptions{
-		BaseURL:             "https://control-plane.example",
-		NodeID:              "node-1",
-		BootstrapCredential: "bootstrap",
-		CredentialPath:      credentialPath,
+		BaseURL:        "https://control-plane.example",
+		NodeID:         "node-1",
+		Region:         "sgp",
+		CredentialPath: credentialPath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -189,5 +208,93 @@ func TestNewClientLoadsPersistedCredential(t *testing.T) {
 	defer client.mu.RUnlock()
 	if client.credential != "node-1.secret" {
 		t.Fatalf("credential = %q", client.credential)
+	}
+}
+
+func TestNewClientRejectsMissingOrInvalidRegion(t *testing.T) {
+	t.Parallel()
+
+	for _, region := range []string{"", "SGP", "sgp!"} {
+		_, err := NewClient(ClientOptions{
+			BaseURL:             "https://control-plane.example",
+			NodeID:              "node-1",
+			Region:              region,
+			BootstrapCredential: "bootstrap",
+			CredentialPath:      filepath.Join(t.TempDir(), "credential"),
+		})
+		if err == nil || !strings.Contains(err.Error(), "region") {
+			t.Fatalf("region %q was unexpectedly accepted: %v", region, err)
+		}
+	}
+}
+
+func TestHeartbeatRejectsMissingV2Status(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewClient(ClientOptions{
+		BaseURL:             "https://control-plane.example",
+		NodeID:              "node-1",
+		Region:              "sgp",
+		BootstrapCredential: "bootstrap",
+		CredentialPath:      filepath.Join(t.TempDir(), "credential"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Heartbeat(t.Context(), NodeStatus{}); err == nil {
+		t.Fatal("empty heartbeat status was accepted")
+	}
+}
+
+func TestClientRequestsLeaseBoundWorkspaceGrant(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s", r.Method)
+		}
+		if r.URL.Path != "/v1/internal/shared-nodes/node-1/workspace-grants/restore" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "SharedNode node-1.credential" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), `"contractVersion":2`) ||
+			!strings.Contains(string(body), `"commandId":"command-1"`) ||
+			!strings.Contains(string(body), `"leaseToken":"lease-token"`) {
+			t.Fatalf("grant request body = %s", body)
+		}
+		_, _ = w.Write([]byte(`{"contractVersion":2,"grants":[{"key":"shared-hosting/account-1/service-1/revisions/1/manifest.json","method":"GET","url":"https://sgp1.vultrobjects.com/workspaces/shared-hosting/account-1/service-1/revisions/1/manifest.json?signature=only-a-url","expiresAt":"2026-01-01T01:00:00Z"}]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientOptions{
+		BaseURL:             server.URL,
+		NodeID:              "node-1",
+		Region:              "sgp",
+		BootstrapCredential: "bootstrap",
+		CredentialPath:      filepath.Join(t.TempDir(), "credential"),
+		HTTPClient:          server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.setCredential("node-1.credential"); err != nil {
+		t.Fatal(err)
+	}
+	grants, err := client.RestoreWorkspaceGrants(t.Context(), Command{
+		CommandID: "command-1", AssignmentID: "assignment-1",
+		Lease: CommandLease{Token: "lease-token", Generation: 1},
+	}, "manifest", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants.Grants) != 1 || grants.Grants[0].Method != "GET" ||
+		strings.Contains(grants.Grants[0].URL, "accessKey") {
+		t.Fatalf("workspace grants = %#v", grants)
 	}
 }

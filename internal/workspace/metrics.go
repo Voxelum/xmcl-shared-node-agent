@@ -46,7 +46,7 @@ func (m *Manager) MetricsHandler() http.Handler {
 		metrics := m.Metrics()
 		writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		_, _ = fmt.Fprintf(writer, "# TYPE xmcl_shared_workspace_logical_bytes gauge\nxmcl_shared_workspace_logical_bytes %d\n", metrics.LogicalBytes)
-		_, _ = fmt.Fprintf(writer, "# TYPE xmcl_shared_workspace_object_bytes gauge\nxmcl_shared_workspace_object_bytes %d\n", metrics.ActualObjectBytes)
+		_, _ = fmt.Fprintf(writer, "# TYPE xmcl_shared_workspace_actual_object_bytes gauge\nxmcl_shared_workspace_actual_object_bytes %d\n", metrics.ActualObjectBytes)
 		_, _ = fmt.Fprintf(writer, "# TYPE xmcl_shared_workspace_restore_download_bytes_total counter\nxmcl_shared_workspace_restore_download_bytes_total %d\n", metrics.RestoreBytes)
 		_, _ = fmt.Fprintf(writer, "# TYPE xmcl_shared_workspace_sync_upload_bytes_total counter\nxmcl_shared_workspace_sync_upload_bytes_total %d\n", metrics.SyncBytes)
 		_, _ = fmt.Fprintf(writer, "# TYPE xmcl_shared_workspace_restore_failures_total counter\nxmcl_shared_workspace_restore_failures_total %d\n", metrics.RestoreFailures)

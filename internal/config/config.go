@@ -3,21 +3,23 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"time"
 )
 
 type Config struct {
 	NodeID                 string
+	Region                 string
 	ControlPlaneURL        string
 	ControlPlaneCredential string
+	IngressHost            string
 	ObjectStorageEndpoint  string
 	ObjectStorageRegion    string
 	ObjectStorageBucket    string
-	ObjectStorageAccessKey string
-	ObjectStorageSecretKey string
 	WorkspaceRoot          string
 	StateRoot              string
 	ContainerImage         string
@@ -29,6 +31,9 @@ type Config struct {
 	QuotaProjectBase       uint32
 	MetricsAddr            string
 }
+
+var ingressHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
+var sharedNodeRegionPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
 
 func Load() (Config, error) {
 	required := func(name string) (string, error) {
@@ -57,13 +62,13 @@ func Load() (Config, error) {
 		target *string
 	}{
 		{"XMCL_SHARED_NODE_ID", &c.NodeID},
+		{"XMCL_SHARED_NODE_REGION", &c.Region},
 		{"XMCL_CONTROL_PLANE_URL", &c.ControlPlaneURL},
 		{"XMCL_CONTROL_PLANE_CREDENTIAL", &c.ControlPlaneCredential},
+		{"XMCL_SHARED_NODE_INGRESS_HOST", &c.IngressHost},
 		{"XMCL_VULTR_OBJECT_STORAGE_ENDPOINT", &c.ObjectStorageEndpoint},
 		{"XMCL_VULTR_OBJECT_STORAGE_REGION", &c.ObjectStorageRegion},
 		{"XMCL_VULTR_OBJECT_STORAGE_BUCKET", &c.ObjectStorageBucket},
-		{"XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY", &c.ObjectStorageAccessKey},
-		{"XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY", &c.ObjectStorageSecretKey},
 		{"XMCL_WORKSPACE_ROOT", &c.WorkspaceRoot},
 		{"XMCL_STATE_ROOT", &c.StateRoot},
 		{"XMCL_CONTAINER_IMAGE", &c.ContainerImage},
@@ -73,6 +78,24 @@ func Load() (Config, error) {
 		if *field.target, err = required(field.name); err != nil {
 			return Config{}, err
 		}
+	}
+	if !ingressHostPattern.MatchString(c.IngressHost) {
+		return Config{}, fmt.Errorf("XMCL_SHARED_NODE_INGRESS_HOST must be a hostname or IPv4 address")
+	}
+	if !sharedNodeRegionPattern.MatchString(c.Region) {
+		return Config{}, fmt.Errorf("XMCL_SHARED_NODE_REGION must be a provider region identifier")
+	}
+	for _, name := range []string{
+		"XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY",
+		"XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY",
+		"XMCL_VULTR_OBJECT_STORAGE_CREDENTIAL_URL",
+	} {
+		if os.Getenv(name) != "" {
+			return Config{}, fmt.Errorf("%s is forbidden: agents receive command-scoped URL grants, not object-storage credentials", name)
+		}
+	}
+	if err := validateObjectStorageEndpoint(c.ObjectStorageEndpoint); err != nil {
+		return Config{}, err
 	}
 	c.WorkspaceRoot, err = filepath.Abs(c.WorkspaceRoot)
 	if err != nil {
@@ -106,4 +129,14 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("XMCL_METRICS_ADDR must bind to a loopback address")
 	}
 	return c, nil
+}
+
+func validateObjectStorageEndpoint(rawURL string) error {
+	endpoint, err := url.Parse(rawURL)
+	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" ||
+		endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" ||
+		(endpoint.Path != "" && endpoint.Path != "/") {
+		return fmt.Errorf("XMCL_VULTR_OBJECT_STORAGE_ENDPOINT must be an absolute HTTPS origin without credentials, path, query, or fragment")
+	}
+	return nil
 }

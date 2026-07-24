@@ -34,6 +34,7 @@ type ContainerRuntime interface {
 type RunningService struct {
 	ServiceID    string
 	AssignmentID string
+	Resources    controlplane.Resources
 }
 
 type RunningServiceProvider interface {
@@ -85,7 +86,7 @@ func (e *Executor) Execute(ctx context.Context, command controlplane.Command) (c
 }
 
 func (e *Executor) TrackLease(commandID string, lease controlplane.CommandLease) error {
-	if lease.Token == "" && lease.Generation == "" {
+	if lease.Token == "" && lease.Generation == 0 {
 		return nil
 	}
 	return e.store.SetLease(commandID, lease)
@@ -131,6 +132,9 @@ func (e *Executor) execute(ctx context.Context, command controlplane.Command) (c
 	}
 	switch command.Kind {
 	case controlplane.RestoreAndStart:
+		if command.Connection == nil || !command.Connection.Valid() {
+			return failed("restore command requires a control-plane assigned public connection"), activePointer(active, exists)
+		}
 		if exists && active.AssignmentID != command.AssignmentID {
 			return failed("a different assignment is already active for this service"), &active
 		}

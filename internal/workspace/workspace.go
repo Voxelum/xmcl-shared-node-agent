@@ -1,6 +1,10 @@
+// Package workspace implements the v2 immutable workspace manifest protocol.
+// Bytes move only through exact command-bound grants; this package has no S3
+// credentials, list, stat, or delete operation.
 package workspace
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -13,61 +17,60 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
-	"github.com/voxelum/xmcl-shared-node-agent/internal/objectstore"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/quota"
 )
-
-type ObjectStore interface {
-	Download(ctx context.Context, key string) ([]byte, error)
-	DownloadTo(ctx context.Context, key string, destination io.Writer) (int64, error)
-	Exists(ctx context.Context, key string) (bool, error)
-	Upload(ctx context.Context, key string, data []byte, contentType string) error
-	UploadFile(ctx context.Context, key, path, contentType string) (int64, error)
-	List(ctx context.Context, prefix string) ([]objectstore.ObjectInfo, error)
-	Delete(ctx context.Context, key string) error
-}
 
 const (
 	maxManifestBytes  int64 = 1 << 20
 	maxWorkspaceBytes int64 = 64 << 30
+	// v2 intentionally uses one immutable PUT per archive rather than general
+	// multipart credentials, so archive creation stays below S3 multipart limits.
+	maxBlobBytes      int64 = 4 << 30
+	maxArchiveEntries       = 100_000
+	worldTargetBytes  int64 = 192 << 20
+	transferAttempts        = 3
 )
 
-type File struct {
-	Path      string `json:"path"`
-	SizeBytes int64  `json:"sizeBytes"`
-	SHA256    string `json:"sha256"`
+// Transfer accepts only a broker-issued object URL for an expected key.
+type Transfer interface {
+	Download(context.Context, controlplane.WorkspaceGrant, string, int64, io.Writer) (TransferResult, error)
+	Upload(context.Context, controlplane.WorkspaceGrant, string, io.Reader, int64, string) (TransferResult, error)
 }
 
-type Manifest struct {
-	SchemaVersion int64  `json:"schemaVersion"`
-	ServiceID     string `json:"serviceId"`
-	AssignmentID  string `json:"assignmentId"`
-	Revision      int64  `json:"revision"`
-	CreatedAt     string `json:"createdAt"`
-	SizeBytes     int64  `json:"sizeBytes"`
-	SHA256        string `json:"sha256"`
-	Files         []File `json:"files"`
+type TransferResult struct {
+	Size   int64
+	SHA256 string
 }
 
 type Manager struct {
-	root    string
-	store   ObjectStore
-	quota   quota.Applier
-	now     func() time.Time
-	sleep   func(context.Context, time.Duration) error
-	metrics storageMetrics
+	root     string
+	grants   controlplane.WorkspaceGrantClient
+	transfer Transfer
+	quota    quota.Applier
+	now      func() time.Time
+	metrics  storageMetrics
+
+	mu       sync.Mutex
+	restored map[string]controlplane.WorkspaceManifest
 }
 
-func New(root string, store ObjectStore, quotaApplier quota.Applier) *Manager {
-	return &Manager{root: root, store: store, quota: quotaApplier, now: time.Now, sleep: sleep}
+func New(root string, grants controlplane.WorkspaceGrantClient, transfer Transfer, quotaApplier quota.Applier) *Manager {
+	return &Manager{
+		root: root, grants: grants, transfer: transfer, quota: quotaApplier,
+		now: time.Now, restored: make(map[string]controlplane.WorkspaceManifest),
+	}
 }
 
 func (m *Manager) Validate(ctx context.Context) error {
+	if m.grants == nil || m.transfer == nil {
+		return errors.New("workspace grant client and direct transfer client are required")
+	}
 	if err := os.MkdirAll(m.root, 0o750); err != nil {
 		return fmt.Errorf("create workspace root: %w", err)
 	}
@@ -79,12 +82,12 @@ func (m *Manager) Validate(ctx context.Context) error {
 
 func (m *Manager) Path(serviceID string) (string, error) {
 	if !validIdentifier(serviceID) {
-		return "", fmt.Errorf("invalid service ID")
+		return "", errors.New("invalid service ID")
 	}
 	path := filepath.Join(m.root, serviceID)
 	relative, err := filepath.Rel(m.root, path)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("service workspace escapes configured root")
+		return "", errors.New("service workspace escapes configured root")
 	}
 	return path, nil
 }
@@ -97,113 +100,130 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 		}
 	}()
 	if command.Workspace.Revision < 0 {
-		return "", fmt.Errorf("workspace revision must be non-negative")
+		return "", errors.New("workspace revision must be non-negative")
 	}
-	prefix, err := cleanPrefix(command.Workspace.ObjectPrefix)
-	if err != nil {
+	if !validWorkspaceLimit(command) {
+		return "", errors.New("workspace quota is outside supported restore limits")
+	}
+	if _, err := workspacePrefix(command); err != nil {
 		return "", err
 	}
 	workspacePath, err := m.Path(command.ServiceID)
 	if err != nil {
 		return "", err
 	}
-	manifestKey := manifestKey(prefix, command.Workspace.Revision)
-	manifestExists, err := m.store.Exists(ctx, manifestKey)
-	if err != nil {
-		return "", fmt.Errorf("check workspace manifest: %w", err)
-	}
-	if !manifestExists {
-		if command.Workspace.Revision != 0 {
-			return "", errors.New("workspace manifest is required for revisions greater than zero")
-		}
-		workspacePath, err := m.activateEmptyWorkspace(command, workspacePath)
+	if command.Workspace.Revision == 0 {
+		path, err := m.activateEmptyWorkspace(command, workspacePath)
 		if err != nil {
 			return "", err
 		}
-		if err := m.quota.Apply(ctx, workspacePath, command.Resources.WorkspaceGiB); err != nil {
+		if err := m.quota.Apply(ctx, path, command.Resources.WorkspaceGiB); err != nil {
 			return "", fmt.Errorf("apply workspace quota: %w", err)
 		}
-		m.metrics.logicalBytes.Store(0)
 		success = true
-		return workspacePath, nil
-	}
-	manifestData, err := m.downloadManifest(ctx, manifestKey)
-	if err != nil {
-		return "", fmt.Errorf("download workspace manifest: %w", err)
+		return path, nil
 	}
 
-	m.metrics.restoreBytes.Add(int64(len(manifestData)))
-	var manifest Manifest
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		return "", fmt.Errorf("decode workspace manifest: %w", err)
+	manifestKey := manifestKey(command.Workspace.ObjectPrefix, command.Workspace.Revision)
+	response, err := m.grants.RestoreWorkspaceGrants(ctx, command, "manifest", nil)
+	if err != nil {
+		return "", fmt.Errorf("request manifest grant: %w", err)
+	}
+	manifestGrant, err := oneGrant(response, manifestKey, "GET")
+	if err != nil {
+		return "", err
+	}
+	var manifestBytes bytes.Buffer
+	var result TransferResult
+	for attempt := 0; attempt < transferAttempts; attempt++ {
+		manifestBytes.Reset()
+		result, err = m.transfer.Download(ctx, manifestGrant, manifestKey, maxManifestBytes, &manifestBytes)
+		if err == nil {
+			break
+		}
+		if attempt == transferAttempts-1 {
+			return "", fmt.Errorf("download manifest: %w", err)
+		}
+		if err := sleep(ctx, time.Duration(1<<attempt)*100*time.Millisecond); err != nil {
+			return "", err
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("download manifest: %w", err)
+	}
+	m.metrics.restoreBytes.Add(result.Size)
+	if command.Workspace.SHA256 != "" && command.Workspace.SHA256 != result.SHA256 {
+		return "", errors.New("workspace manifest does not match assigned hash")
+	}
+	var manifest controlplane.WorkspaceManifest
+	if err := json.Unmarshal(manifestBytes.Bytes(), &manifest); err != nil {
+		return "", fmt.Errorf("decode workspace v2 manifest: %w", err)
 	}
 	if err := validateManifest(manifest, command); err != nil {
 		return "", err
 	}
-	if command.Workspace.SHA256 != "" && command.Workspace.SHA256 != digest(manifestData) {
-		return "", errors.New("workspace manifest does not match the assigned hash")
+
+	descriptors := manifestDescriptors(manifest)
+	keys := make([]string, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		keys = append(keys, descriptor.Key)
 	}
-	staging := filepath.Join(m.root, ".staging", command.ServiceID+"-"+command.CommandID)
-	if err := os.RemoveAll(staging); err != nil {
+	blobGrants, err := m.grants.RestoreWorkspaceGrants(ctx, command, "blobs", keys)
+	if err != nil {
+		return "", fmt.Errorf("request blob grants: %w", err)
+	}
+	grants, err := grantsByKey(blobGrants, keys, "GET")
+	if err != nil {
+		return "", err
+	}
+	stagingBase := filepath.Join(m.root, ".staging", command.ServiceID+"-"+command.CommandID)
+	if err := os.RemoveAll(stagingBase); err != nil {
 		return "", fmt.Errorf("clean restore staging directory: %w", err)
 	}
-	if err := os.MkdirAll(staging, 0o750); err != nil {
+	defer os.RemoveAll(stagingBase)
+	extractionRoot := filepath.Join(stagingBase, "workspace")
+	archiveRoot := filepath.Join(stagingBase, "blobs")
+	if err := os.MkdirAll(archiveRoot, 0o750); err != nil {
 		return "", fmt.Errorf("create restore staging directory: %w", err)
 	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.RemoveAll(staging)
-		}
-	}()
-	for _, file := range manifest.Files {
-		target, err := safeChild(staging, file.Path)
+	seen := make(map[string]struct{})
+	var extractedBytes int64
+	for index, descriptor := range descriptors {
+		archivePath := filepath.Join(archiveRoot, fmt.Sprintf("%03d.tar.zst", index))
+		download, err := m.downloadArchive(
+			ctx,
+			grants[descriptor.Key],
+			descriptor,
+			archivePath,
+		)
 		if err != nil {
 			return "", err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-			return "", fmt.Errorf("create workspace directory: %w", err)
+		m.metrics.restoreBytes.Add(download.Size)
+		if download.Size != descriptor.CompressedSize || download.SHA256 != descriptor.SHA256 {
+			return "", errors.New("workspace blob does not match its descriptor")
 		}
-		dataSize, dataHash, err := m.downloadFile(ctx, fileKey(prefix, command.Workspace.Revision, file.Path), target, file.SizeBytes)
+		extracted, err := extractArchive(archivePath, extractionRoot, descriptor, seen, workspaceLimit(command))
 		if err != nil {
-			return "", fmt.Errorf("download workspace file %q: %w", file.Path, err)
+			return "", err
 		}
-		m.metrics.restoreBytes.Add(dataSize)
-		if dataSize != file.SizeBytes || dataHash != file.SHA256 {
-			return "", fmt.Errorf("workspace file %q does not match its manifest hash", file.Path)
+		extractedBytes += extracted
+		if extractedBytes > workspaceLimit(command) {
+			return "", errors.New("workspace exceeds configured extraction limit")
 		}
 	}
-	if err := os.RemoveAll(workspacePath); err != nil {
-		return "", fmt.Errorf("replace previous workspace: %w", err)
+	if extractedBytes != manifest.LogicalSize {
+		return "", errors.New("workspace archive logical size does not match manifest")
 	}
-	if err := os.Rename(staging, workspacePath); err != nil {
-		return "", fmt.Errorf("activate restored workspace: %w", err)
+	if err := m.activateStaging(ctx, command, extractionRoot, workspacePath); err != nil {
+		return "", err
 	}
-	cleanup = false
-	if err := m.quota.Apply(ctx, workspacePath, command.Resources.WorkspaceGiB); err != nil {
-		return "", fmt.Errorf("apply workspace quota: %w", err)
-	}
-	m.metrics.logicalBytes.Store(manifest.SizeBytes)
+	m.mu.Lock()
+	m.restored[command.ServiceID] = manifest
+	m.mu.Unlock()
+	m.metrics.logicalBytes.Store(manifest.LogicalSize)
+	m.metrics.actualObjectBytes.Store(result.Size + compressedSize(manifestDescriptors(manifest)))
 	success = true
-	return workspacePath, nil
-}
-
-func (m *Manager) activateEmptyWorkspace(command controlplane.Command, workspacePath string) (string, error) {
-	staging := filepath.Join(m.root, ".staging", command.ServiceID+"-"+command.CommandID)
-	if err := os.RemoveAll(staging); err != nil {
-		return "", fmt.Errorf("clean empty workspace staging directory: %w", err)
-	}
-	if err := os.MkdirAll(staging, 0o750); err != nil {
-		return "", fmt.Errorf("create empty workspace staging directory: %w", err)
-	}
-	if err := os.RemoveAll(workspacePath); err != nil {
-		_ = os.RemoveAll(staging)
-		return "", fmt.Errorf("replace previous workspace: %w", err)
-	}
-	if err := os.Rename(staging, workspacePath); err != nil {
-		_ = os.RemoveAll(staging)
-		return "", fmt.Errorf("activate empty workspace: %w", err)
-	}
 	return workspacePath, nil
 }
 
@@ -214,158 +234,293 @@ func (m *Manager) Sync(ctx context.Context, command controlplane.Command) (contr
 			m.metrics.syncFailures.Add(1)
 		}
 	}()
+	if command.Kind != controlplane.StopAndSync {
+		return controlplane.SyncResult{}, errors.New("workspace sync requires stop-and-sync command")
+	}
+	if !validWorkspaceLimit(command) {
+		return controlplane.SyncResult{}, errors.New("workspace quota is outside supported sync limits")
+	}
+	prefix, err := workspacePrefix(command)
+	if err != nil {
+		return controlplane.SyncResult{}, err
+	}
 	workspacePath, err := m.Path(command.ServiceID)
 	if err != nil {
 		return controlplane.SyncResult{}, err
 	}
-	prefix, err := cleanPrefix(command.Workspace.ObjectPrefix)
-	if err != nil {
-		return controlplane.SyncResult{}, err
-	}
-	files, err := collectFiles(workspacePath)
+	files, createdAt, err := collectFiles(workspacePath)
 	if err != nil {
 		return controlplane.SyncResult{}, err
 	}
 	revision := command.Workspace.Revision + 1
-	manifestObjectKey := manifestKey(prefix, revision)
-	exists, err := m.store.Exists(ctx, manifestObjectKey)
+	stagingBase := filepath.Join(m.root, ".staging", command.ServiceID+"-"+command.CommandID+"-sync")
+	if err := os.RemoveAll(stagingBase); err != nil {
+		return controlplane.SyncResult{}, fmt.Errorf("clean sync staging: %w", err)
+	}
+	defer os.RemoveAll(stagingBase)
+	if err := os.MkdirAll(stagingBase, 0o750); err != nil {
+		return controlplane.SyncResult{}, fmt.Errorf("create sync staging: %w", err)
+	}
+	m.mu.Lock()
+	previous := m.restored[command.ServiceID]
+	m.mu.Unlock()
+	manifest, archives, err := m.buildManifest(stagingBase, prefix, command, revision, files, createdAt, previous)
 	if err != nil {
-		return controlplane.SyncResult{}, fmt.Errorf("check existing revision manifest: %w", err)
+		return controlplane.SyncResult{}, err
 	}
-	if exists {
-		data, err := m.downloadManifest(ctx, manifestObjectKey)
-		if err != nil {
-			return controlplane.SyncResult{}, fmt.Errorf("read existing revision manifest: %w", err)
-		}
-		var manifest Manifest
-		if err := json.Unmarshal(data, &manifest); err != nil {
-			return controlplane.SyncResult{}, fmt.Errorf("decode existing revision manifest: %w", err)
-		}
-		if err := validatePublishedManifest(manifest, command, revision); err != nil {
-			return controlplane.SyncResult{}, fmt.Errorf("existing revision is not this command's completed workspace: %w", err)
-		}
-		m.metrics.logicalBytes.Store(manifest.SizeBytes)
-		success = true
-		return controlplane.SyncResult{
-			ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
-			Revision: revision, SizeBytes: manifest.SizeBytes, ManifestSHA: digest(data),
-		}, nil
-	}
-	manifest := Manifest{
-		SchemaVersion: 1,
-		ServiceID:     command.ServiceID,
-		AssignmentID:  command.AssignmentID,
-		Revision:      revision,
-		CreatedAt:     m.now().UTC().Format(time.RFC3339Nano),
-		Files:         make([]File, 0, len(files)),
-	}
-	for _, path := range files {
-		localPath := filepath.Join(workspacePath, filepath.FromSlash(path))
-		size, fileHash, err := hashFile(localPath)
-		if err != nil {
-			return controlplane.SyncResult{}, fmt.Errorf("read workspace file %q: %w", path, err)
-		}
-		file := File{Path: path, SizeBytes: size, SHA256: fileHash}
-		manifest.Files = append(manifest.Files, file)
-		manifest.SizeBytes += file.SizeBytes
-		if err := m.uploadFile(ctx, fileKey(prefix, revision, path), localPath, file.SizeBytes); err != nil {
-			return controlplane.SyncResult{}, fmt.Errorf("upload workspace file %q: %w", path, err)
-		}
-	}
-	manifest.SHA256 = aggregateHash(manifest.Files)
-	manifestData, err := json.Marshal(manifest)
+	manifestBytes, err := json.Marshal(manifest)
 	if err != nil {
-		return controlplane.SyncResult{}, fmt.Errorf("encode workspace manifest: %w", err)
+		return controlplane.SyncResult{}, fmt.Errorf("encode workspace v2 manifest: %w", err)
 	}
-	manifestSHA := digest(manifestData)
-	// Publishing this object last makes every visible revision fully restorable.
-	if err := m.upload(ctx, manifestObjectKey, manifestData, "application/json"); err != nil {
+	manifestSHA := digest(manifestBytes)
+	response, err := m.grants.SyncWorkspaceGrants(ctx, command, manifest, manifestSHA)
+	if err != nil {
+		return controlplane.SyncResult{}, fmt.Errorf("request sync grants: %w", err)
+	}
+	descriptorKeys := make([]string, 0, len(archives))
+	for _, archive := range archives {
+		descriptorKeys = append(descriptorKeys, archive.descriptor.Key)
+	}
+	uploadGrants, err := grantsByKeySubset(response, descriptorKeys, "PUT")
+	if err != nil {
+		return controlplane.SyncResult{}, err
+	}
+	for _, archive := range archives {
+		grant, upload := uploadGrants[archive.descriptor.Key]
+		if !upload {
+			continue // The control plane proved this immutable descriptor is published.
+		}
+		if err := m.uploadArchive(ctx, grant, archive); err != nil {
+			return controlplane.SyncResult{}, err
+		}
+	}
+	publish, err := m.grants.PublishWorkspaceGrant(ctx, command, manifest, manifestSHA)
+	if err != nil {
+		return controlplane.SyncResult{}, fmt.Errorf("request manifest publish grant: %w", err)
+	}
+	manifestGrant, err := oneGrant(publish, manifestKey(command.Workspace.ObjectPrefix, revision), "PUT")
+	if err != nil {
+		return controlplane.SyncResult{}, err
+	}
+	uploadedManifest, err := m.uploadBytes(
+		ctx,
+		manifestGrant,
+		manifestGrant.Key,
+		manifestBytes,
+		manifestSHA,
+	)
+	if err != nil {
 		return controlplane.SyncResult{}, fmt.Errorf("publish workspace manifest: %w", err)
 	}
-	m.metrics.logicalBytes.Store(manifest.SizeBytes)
+	if uploadedManifest {
+		m.metrics.syncBytes.Add(int64(len(manifestBytes)))
+	}
+	m.metrics.logicalBytes.Store(manifest.LogicalSize)
+	m.metrics.actualObjectBytes.Store(int64(len(manifestBytes)) + compressedSize(manifestDescriptors(manifest)))
+	m.mu.Lock()
+	m.restored[command.ServiceID] = manifest
+	m.mu.Unlock()
 	success = true
 	return controlplane.SyncResult{
 		ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
-		Revision: revision, SizeBytes: manifest.SizeBytes, ManifestSHA: manifestSHA,
+		Revision: revision, SizeBytes: manifest.LogicalSize, ManifestSHA: manifestSHA,
 	}, nil
 }
 
-// RefreshObjectBytes records the total physical object bytes retained under a
-// service prefix, including retained historical revisions.
-func (m *Manager) RefreshObjectBytes(ctx context.Context, objectPrefix string) error {
-	prefix, err := cleanPrefix(objectPrefix)
+func (m *Manager) buildManifest(stagingBase, prefix string, command controlplane.Command, revision int64, files []workspaceFile, createdAt time.Time, previous controlplane.WorkspaceManifest) (controlplane.WorkspaceManifest, []archive, error) {
+	layers := classify(files)
+	var archives []archive
+	content, err := buildArchive(filepath.Join(stagingBase, "content.tar.zst"), layers.content)
 	if err != nil {
-		return err
+		return controlplane.WorkspaceManifest{}, nil, err
 	}
-	objects, err := m.store.List(ctx, prefix+"/")
-	if err != nil {
-		return fmt.Errorf("list workspace objects: %w", err)
+	content.descriptor.Key = prefix + "/content/" + content.descriptor.SHA256 + ".tar.zst"
+	if previous.Content != nil && sameArchive(*previous.Content, content.descriptor) {
+		content.descriptor = *previous.Content
 	}
-	var total int64
-	for _, object := range objects {
-		total += object.Size
-	}
-	m.metrics.actualObjectBytes.Store(total)
-	return nil
-}
-
-const incompleteRevisionGrace = 24 * time.Hour
-
-// CleanupIncomplete removes only stale revisions that have no manifest. A
-// manifest is the commit marker, so complete and currently referenced
-// revisions are never candidates for deletion.
-func (m *Manager) CleanupIncomplete(ctx context.Context, objectPrefix string, currentRevision int64) error {
-	prefix, err := cleanPrefix(objectPrefix)
-	if err != nil {
-		return err
-	}
-	revisionPrefix := prefix + "/revisions/"
-	objects, err := m.store.List(ctx, revisionPrefix)
-	if err != nil {
-		return fmt.Errorf("list incomplete revisions: %w", err)
-	}
-	type revisionObjects struct {
-		objects  []objectstore.ObjectInfo
-		manifest bool
-		newest   time.Time
-	}
-	revisions := make(map[int64]*revisionObjects)
-	for _, object := range objects {
-		relative := strings.TrimPrefix(object.Key, revisionPrefix)
-		parts := strings.SplitN(relative, "/", 2)
-		if len(parts) != 2 {
-			continue
+	archives = append(archives, content)
+	var config *archive
+	if len(layers.config) > 0 {
+		value, err := buildArchive(filepath.Join(stagingBase, "config.tar.zst"), layers.config)
+		if err != nil {
+			return controlplane.WorkspaceManifest{}, nil, err
 		}
-		revision, err := strconv.ParseInt(parts[0], 10, 64)
-		if err != nil || revision < 0 {
-			continue
+		value.descriptor.Key = fmt.Sprintf("%s/revisions/%d/config.tar.zst", prefix, revision)
+		if previous.Config != nil && sameArchive(*previous.Config, value.descriptor) {
+			value.descriptor = *previous.Config
 		}
-		entry := revisions[revision]
-		if entry == nil {
-			entry = &revisionObjects{}
-			revisions[revision] = entry
-		}
-		entry.objects = append(entry.objects, object)
-		entry.manifest = entry.manifest || parts[1] == "manifest.json"
-		if object.LastModified.After(entry.newest) {
-			entry.newest = object.LastModified
-		}
+		config = &value
+		archives = append(archives, value)
 	}
-	for revision, entry := range revisions {
-		if revision == currentRevision || entry.manifest || m.now().Sub(entry.newest) < incompleteRevisionGrace {
-			continue
+	for index, group := range layers.world {
+		value, err := buildArchive(filepath.Join(stagingBase, fmt.Sprintf("world-%03d.tar.zst", index)), group)
+		if err != nil {
+			return controlplane.WorkspaceManifest{}, nil, err
 		}
-		for _, object := range entry.objects {
-			if err := m.store.Delete(ctx, object.Key); err != nil {
-				return fmt.Errorf("delete incomplete revision %d: %w", revision, err)
+		value.descriptor.Key = fmt.Sprintf("%s/revisions/%d/world/world-%03d.tar.zst", prefix, revision, index)
+		for _, previousWorld := range previous.World {
+			if sameArchive(previousWorld, value.descriptor) {
+				value.descriptor = previousWorld
+				break
 			}
 		}
+		archives = append(archives, value)
+	}
+	manifest := controlplane.WorkspaceManifest{
+		SchemaVersion: 2, ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
+		Revision: revision, CreatedAt: createdAt.UTC().Format(time.RFC3339Nano),
+		Content: &content.descriptor, World: make([]controlplane.WorkspaceBlob, 0, len(layers.world)),
+	}
+	if config != nil {
+		manifest.Config = &config.descriptor
+	}
+	for _, value := range archives {
+		manifest.LogicalSize += value.descriptor.LogicalSize
+		if strings.Contains(value.descriptor.Key, "/world/") {
+			manifest.World = append(manifest.World, value.descriptor)
+		}
+	}
+	manifest.AggregateSHA256 = aggregateDescriptors(manifestDescriptors(manifest))
+	manifest.ManifestHash = manifest.AggregateSHA256
+	return manifest, archives, nil
+}
+
+func (m *Manager) uploadArchive(ctx context.Context, grant controlplane.WorkspaceGrant, archive archive) error {
+	for attempt := 0; attempt < transferAttempts; attempt++ {
+		file, err := os.Open(archive.path)
+		if err != nil {
+			return fmt.Errorf("open workspace archive: %w", err)
+		}
+		result, uploadErr := m.transfer.Upload(ctx, grant, archive.descriptor.Key, file, archive.descriptor.CompressedSize, archive.descriptor.SHA256)
+		closeErr := file.Close()
+		if uploadErr == nil && closeErr == nil {
+			if result.Size != archive.descriptor.CompressedSize || result.SHA256 != archive.descriptor.SHA256 {
+				return errors.New("uploaded blob does not match descriptor")
+			}
+			m.metrics.syncBytes.Add(result.Size)
+			return nil
+		}
+		if errors.Is(uploadErr, ErrAlreadyExists) {
+			return nil
+		}
+		if uploadErr == nil {
+			uploadErr = closeErr
+		}
+		if attempt == transferAttempts-1 {
+			return fmt.Errorf("upload workspace blob: %w", uploadErr)
+		}
+
+		if err := sleep(ctx, time.Duration(1<<attempt)*100*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	return errors.New("unreachable upload retry")
+}
+
+func (m *Manager) downloadArchive(
+	ctx context.Context,
+	grant controlplane.WorkspaceGrant,
+	descriptor controlplane.WorkspaceBlob,
+	path string,
+) (TransferResult, error) {
+	for attempt := 0; attempt < transferAttempts; attempt++ {
+		_ = os.Remove(path)
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o640)
+		if err != nil {
+			return TransferResult{}, fmt.Errorf("create staged archive: %w", err)
+		}
+		result, transferErr := m.transfer.Download(
+			ctx,
+			grant,
+			descriptor.Key,
+			descriptor.CompressedSize,
+			file,
+		)
+		closeErr := file.Close()
+		if transferErr == nil && closeErr == nil {
+			return result, nil
+		}
+		_ = os.Remove(path)
+		if transferErr == nil {
+			transferErr = closeErr
+		}
+		if attempt == transferAttempts-1 {
+			return TransferResult{}, fmt.Errorf("download workspace blob: %w", transferErr)
+		}
+		if err := sleep(ctx, time.Duration(1<<attempt)*100*time.Millisecond); err != nil {
+			return TransferResult{}, err
+		}
+	}
+	return TransferResult{}, errors.New("unreachable download retry")
+}
+
+func (m *Manager) uploadBytes(
+	ctx context.Context,
+	grant controlplane.WorkspaceGrant,
+	key string,
+	value []byte,
+	expectedSHA string,
+) (bool, error) {
+	for attempt := 0; attempt < transferAttempts; attempt++ {
+		result, err := m.transfer.Upload(
+			ctx,
+			grant,
+			key,
+			bytes.NewReader(value),
+			int64(len(value)),
+			expectedSHA,
+		)
+		if err == nil {
+			if result.Size != int64(len(value)) || result.SHA256 != expectedSHA {
+				return false, errors.New("uploaded manifest does not match descriptor")
+			}
+			return true, nil
+		}
+		if errors.Is(err, ErrAlreadyExists) {
+			return false, nil
+		}
+		if attempt == transferAttempts-1 {
+			return false, err
+		}
+		if err := sleep(ctx, time.Duration(1<<attempt)*100*time.Millisecond); err != nil {
+			return false, err
+		}
+	}
+	return false, errors.New("unreachable upload retry")
+}
+
+func (m *Manager) activateEmptyWorkspace(command controlplane.Command, workspacePath string) (string, error) {
+	staging := filepath.Join(m.root, ".staging", command.ServiceID+"-"+command.CommandID, "workspace")
+	if err := os.RemoveAll(staging); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(staging, 0o750); err != nil {
+		return "", err
+	}
+	if err := replaceWorkspace(staging, workspacePath); err != nil {
+		return "", err
+	}
+	return workspacePath, nil
+}
+
+func (m *Manager) activateStaging(ctx context.Context, command controlplane.Command, staging, workspacePath string) error {
+	backup, err := replaceWorkspaceWithBackup(staging, workspacePath)
+	if err != nil {
+		return err
+	}
+	if err := m.quota.Apply(ctx, workspacePath, command.Resources.WorkspaceGiB); err != nil {
+		_ = os.RemoveAll(workspacePath)
+		if backup != "" {
+			_ = os.Rename(backup, workspacePath)
+		}
+		return fmt.Errorf("apply workspace quota: %w", err)
+	}
+	if backup != "" {
+		_ = os.RemoveAll(backup)
 	}
 	return nil
 }
 
-// Release evicts the local execution copy only after the control plane has
-// acknowledged a durable sync. Object storage remains authoritative.
 func (m *Manager) Release(_ context.Context, command controlplane.Command) error {
 	path, err := m.Path(command.ServiceID)
 	if err != nil {
@@ -374,111 +529,281 @@ func (m *Manager) Release(_ context.Context, command controlplane.Command) error
 	if err := os.RemoveAll(path); err != nil {
 		return fmt.Errorf("remove released local workspace: %w", err)
 	}
+	m.mu.Lock()
+	delete(m.restored, command.ServiceID)
+	m.mu.Unlock()
 	return nil
 }
 
-func validateManifest(manifest Manifest, command controlplane.Command) error {
-	if manifest.SchemaVersion != 1 || manifest.ServiceID != command.ServiceID || manifest.AssignmentID != command.AssignmentID ||
-		manifest.Revision != command.Workspace.Revision {
-		return errors.New("workspace manifest does not match the assigned service, assignment, or revision")
-	}
+type workspaceFile struct {
+	path string
+	full string
+	size int64
+}
 
-	var size int64
-	workspaceLimit := command.Resources.WorkspaceGiB * 1024 * 1024 * 1024
-	if workspaceLimit < 1 || workspaceLimit > maxWorkspaceBytes {
-		workspaceLimit = maxWorkspaceBytes
-	}
-	for _, file := range manifest.Files {
-		if _, err := safeChild(string(filepath.Separator), file.Path); err != nil {
-			return fmt.Errorf("invalid workspace manifest path %q: %w", file.Path, err)
+type archive struct {
+	path       string
+	descriptor controlplane.WorkspaceBlob
+}
+
+type layers struct {
+	content []workspaceFile
+	config  []workspaceFile
+	world   [][]workspaceFile
+}
+
+func classify(files []workspaceFile) layers {
+	result := layers{}
+	worldGroups := map[string][]workspaceFile{}
+	for _, file := range files {
+		parts := strings.Split(file.path, "/")
+		switch parts[0] {
+		case "world", "world_nether", "world_the_end":
+			group := parts[0]
+			if len(parts) > 1 {
+				group += "/" + parts[1]
+			}
+			worldGroups[group] = append(worldGroups[group], file)
+		case "config", "defaultconfigs":
+			result.config = append(result.config, file)
+		default:
+			result.content = append(result.content, file)
 		}
-		if file.SizeBytes < 0 || file.SizeBytes > maxWorkspaceBytes || len(file.SHA256) != sha256.Size*2 {
-			return fmt.Errorf("invalid workspace manifest file %q", file.Path)
+	}
+	keys := make([]string, 0, len(worldGroups))
+	for key := range worldGroups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		group := worldGroups[key]
+		sortFiles(group)
+		var shard []workspaceFile
+		var size int64
+		for _, file := range group {
+			if len(shard) > 0 && size+file.size > worldTargetBytes {
+				result.world = append(result.world, shard)
+				shard, size = nil, 0
+			}
+			shard = append(shard, file)
+			size += file.size
 		}
-		size += file.SizeBytes
+		if len(shard) > 0 {
+			result.world = append(result.world, shard)
+		}
 	}
-	if size > workspaceLimit || size != manifest.SizeBytes || aggregateHash(manifest.Files) != manifest.SHA256 {
-		return errors.New("workspace manifest aggregate hash or size is invalid")
-	}
-
-	return nil
+	sortFiles(result.content)
+	sortFiles(result.config)
+	return result
 }
 
-func (m *Manager) downloadManifest(ctx context.Context, key string) ([]byte, error) {
-	var buffer bytes.Buffer
-	writer := &limitedWriter{writer: &buffer, remaining: maxManifestBytes}
-	if _, err := m.store.DownloadTo(ctx, key, writer); err != nil {
-		return nil, err
-	}
-	return buffer.Bytes(), nil
-}
-
-func (m *Manager) downloadFile(ctx context.Context, key, path string, expectedSize int64) (int64, string, error) {
-	if expectedSize < 0 || expectedSize > maxWorkspaceBytes {
-		return 0, "", errors.New("workspace file exceeds the configured maximum")
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o640)
+func buildArchive(path string, files []workspaceFile) (archive, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
 	if err != nil {
-		return 0, "", err
+		return archive{}, err
 	}
-	hash := sha256.New()
-	writer := &limitedWriter{writer: io.MultiWriter(file, hash), remaining: expectedSize}
-	size, downloadErr := m.store.DownloadTo(ctx, key, writer)
-	closeErr := file.Close()
-	if downloadErr != nil {
-		_ = os.Remove(path)
-		return size, "", downloadErr
+	encoder, err := zstd.NewWriter(file)
+	if err != nil {
+		_ = file.Close()
+		return archive{}, err
 	}
-	if closeErr != nil {
-		_ = os.Remove(path)
-		return size, "", closeErr
+	writer := tar.NewWriter(encoder)
+	var logicalSize int64
+	for _, source := range files {
+		if !validWorkspacePath(source.path) || source.size < 0 || source.size > maxWorkspaceBytes {
+			_ = writer.Close()
+			_ = encoder.Close()
+			_ = file.Close()
+			return archive{}, errors.New("invalid workspace archive path or file size")
+		}
+		header := &tar.Header{
+			Name: source.path, Mode: 0o640, Size: source.size, Typeflag: tar.TypeReg,
+			ModTime: time.Unix(0, 0).UTC(), AccessTime: time.Time{}, ChangeTime: time.Time{},
+			Format: tar.FormatPAX,
+		}
+		if err := writer.WriteHeader(header); err != nil {
+			_ = writer.Close()
+			_ = encoder.Close()
+			_ = file.Close()
+			return archive{}, err
+		}
+		input, err := os.Open(source.full)
+		if err != nil {
+			_ = writer.Close()
+			_ = encoder.Close()
+			_ = file.Close()
+			return archive{}, err
+		}
+		written, copyErr := io.Copy(writer, io.LimitReader(input, source.size+1))
+		closeErr := input.Close()
+		if copyErr != nil || closeErr != nil || written != source.size {
+			_ = writer.Close()
+			_ = encoder.Close()
+			_ = file.Close()
+			return archive{}, errors.New("workspace file changed while being archived")
+		}
+		logicalSize += written
 	}
-	return size, hex.EncodeToString(hash.Sum(nil)), nil
+	if err := writer.Close(); err != nil {
+		_ = encoder.Close()
+		_ = file.Close()
+		return archive{}, err
+	}
+	if err := encoder.Close(); err != nil {
+		_ = file.Close()
+		return archive{}, err
+	}
+	if err := file.Close(); err != nil {
+		return archive{}, err
+	}
+	size, sum, err := hashFile(path, maxBlobBytes)
+	if err != nil {
+		return archive{}, err
+	}
+	paths := make([]string, 0, len(files))
+	for _, source := range files {
+		paths = append(paths, source.path)
+	}
+	return archive{
+		path: path,
+		descriptor: controlplane.WorkspaceBlob{
+			SHA256: sum, CompressedSize: size, LogicalSize: logicalSize, Paths: paths,
+		},
+	}, nil
 }
 
-func hashFile(path string) (int64, string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, "", err
-	}
-	if info.Size() > maxWorkspaceBytes {
-		return 0, "", errors.New("workspace file exceeds the configured maximum")
-	}
+func extractArchive(path, root string, descriptor controlplane.WorkspaceBlob, seen map[string]struct{}, limit int64) (int64, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return 0, "", err
+		return 0, err
 	}
 	defer file.Close()
-	hash := sha256.New()
-	size, err := io.Copy(hash, file)
+	reader, err := zstd.NewReader(file)
 	if err != nil {
-		return size, "", err
+		return 0, fmt.Errorf("open zstd archive: %w", err)
 	}
-	return size, hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-type limitedWriter struct {
-	writer    io.Writer
-	remaining int64
-}
-
-func (w *limitedWriter) Write(data []byte) (int, error) {
-	if int64(len(data)) > w.remaining {
-		return 0, errors.New("object exceeds configured transfer limit")
+	defer reader.Close()
+	archive := tar.NewReader(reader)
+	expected := make(map[string]struct{}, len(descriptor.Paths))
+	for _, path := range descriptor.Paths {
+		if !validWorkspacePath(path) {
+			return 0, errors.New("manifest contains invalid archive path")
+		}
+		if _, duplicate := expected[path]; duplicate {
+			return 0, errors.New("manifest contains duplicate archive path")
+		}
+		expected[path] = struct{}{}
 	}
-	count, err := w.writer.Write(data)
-	w.remaining -= int64(count)
-	return count, err
+	var total int64
+	entries := 0
+	for {
+		header, err := archive.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return 0, fmt.Errorf("read tar archive: %w", err)
+		}
+		entries++
+		if entries > maxArchiveEntries || header.Typeflag != tar.TypeReg || !validWorkspacePath(header.Name) ||
+			header.Size < 0 || header.Size > limit || total+header.Size > limit {
+			return 0, errors.New("workspace archive violates extraction limits")
+		}
+		if _, allowed := expected[header.Name]; !allowed {
+			return 0, errors.New("workspace archive member is not in manifest mapping")
+		}
+		if _, duplicate := seen[header.Name]; duplicate {
+			return 0, errors.New("workspace archive contains duplicate local path")
+		}
+		target, err := safeChild(root, header.Name)
+		if err != nil {
+			return 0, err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+			return 0, err
+		}
+		output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
+		if err != nil {
+			return 0, err
+		}
+		written, copyErr := io.Copy(output, io.LimitReader(archive, header.Size+1))
+		closeErr := output.Close()
+		if copyErr != nil || closeErr != nil || written != header.Size {
+			_ = os.Remove(target)
+			return 0, errors.New("workspace archive member has invalid size")
+		}
+		seen[header.Name] = struct{}{}
+		delete(expected, header.Name)
+		total += written
+	}
+	if len(expected) != 0 || total != descriptor.LogicalSize {
+		return 0, errors.New("workspace archive does not match manifest path mapping")
+	}
+	return total, nil
 }
 
-func validatePublishedManifest(manifest Manifest, command controlplane.Command, revision int64) error {
-	copy := command
-	copy.Workspace.Revision = revision
-	return validateManifest(manifest, copy)
+func validateManifest(manifest controlplane.WorkspaceManifest, command controlplane.Command) error {
+	if manifest.SchemaVersion != 2 || manifest.ServiceID != command.ServiceID ||
+		manifest.Revision != command.Workspace.Revision || manifest.AssignmentID == "" ||
+		!validSHA256(manifest.ManifestHash) || !validSHA256(manifest.AggregateSHA256) ||
+		manifest.ManifestHash != manifest.AggregateSHA256 || manifest.Content == nil ||
+		manifest.LogicalSize < 0 || manifest.LogicalSize > workspaceLimit(command) {
+		return errors.New("workspace v2 manifest does not match assigned service or revision")
+	}
+	prefix, err := workspacePrefix(command)
+	if err != nil {
+		return err
+	}
+	descriptors := manifestDescriptors(manifest)
+	if len(descriptors) == 0 || len(descriptors) > 130 || aggregateDescriptors(descriptors) != manifest.AggregateSHA256 {
+		return errors.New("workspace manifest blob descriptor aggregate is invalid")
+	}
+	keys, paths := make(map[string]struct{}), make(map[string]struct{})
+	var logicalSize, compressedSize int64
+	for _, descriptor := range descriptors {
+		if !validDescriptor(descriptor) {
+			return errors.New("workspace manifest has an invalid blob descriptor")
+		}
+		if _, duplicate := keys[descriptor.Key]; duplicate {
+			return errors.New("workspace manifest has duplicate blob key")
+		}
+		keys[descriptor.Key] = struct{}{}
+		for _, path := range descriptor.Paths {
+			if !validWorkspacePath(path) {
+				return errors.New("workspace manifest has an unsafe local path")
+			}
+			if _, duplicate := paths[path]; duplicate {
+				return errors.New("workspace manifest has duplicate local path")
+			}
+			paths[path] = struct{}{}
+		}
+		logicalSize += descriptor.LogicalSize
+		compressedSize += descriptor.CompressedSize
+	}
+	if logicalSize != manifest.LogicalSize || compressedSize > maxWorkspaceBytes || len(paths) > maxArchiveEntries {
+		return errors.New("workspace manifest logical size is invalid")
+	}
+	if manifest.Content.Key != prefix+"/content/"+manifest.Content.SHA256+".tar.zst" ||
+		!allPaths(manifest.Content.Paths, isContentPath) {
+		return errors.New("workspace manifest content layer is invalid")
+	}
+	if manifest.Config != nil {
+		if !revisionLayerKey(prefix, manifest.Config.Key, "config.tar.zst") ||
+			!allPaths(manifest.Config.Paths, isConfigPath) {
+			return errors.New("workspace manifest config layer is invalid")
+		}
+	}
+	for _, descriptor := range manifest.World {
+		if !worldLayerKey(prefix, descriptor.Key) || !allPaths(descriptor.Paths, isWorldPath) {
+			return errors.New("workspace manifest world layer is invalid")
+		}
+	}
+	return nil
 }
 
-func collectFiles(root string) ([]string, error) {
-	var files []string
+func collectFiles(root string) ([]workspaceFile, time.Time, error) {
+	var files []workspaceFile
+	createdAt := time.Unix(0, 0).UTC()
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -495,28 +820,225 @@ func collectFiles(root string) ([]string, error) {
 		if !entry.Type().IsRegular() {
 			return fmt.Errorf("workspace contains non-regular file %q", path)
 		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() < 0 || info.Size() > maxWorkspaceBytes {
+			return errors.New("workspace file exceeds configured maximum")
+		}
 		relative, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
-		files = append(files, filepath.ToSlash(relative))
+		relative = filepath.ToSlash(relative)
+		if !validWorkspacePath(relative) {
+			return errors.New("workspace contains invalid path")
+		}
+		files = append(files, workspaceFile{path: relative, full: path, size: info.Size()})
+		if info.ModTime().After(createdAt) {
+			createdAt = info.ModTime()
+		}
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("walk workspace: %w", err)
+		return nil, time.Time{}, fmt.Errorf("walk workspace: %w", err)
 	}
-	sort.Strings(files)
-	return files, nil
+	sortFiles(files)
+	return files, createdAt, nil
+}
+
+func manifestDescriptors(manifest controlplane.WorkspaceManifest) []controlplane.WorkspaceBlob {
+	result := make([]controlplane.WorkspaceBlob, 0, 2+len(manifest.World))
+	if manifest.Content != nil {
+		result = append(result, *manifest.Content)
+	}
+	if manifest.Config != nil {
+		result = append(result, *manifest.Config)
+	}
+	result = append(result, manifest.World...)
+	return result
+}
+
+func compressedSize(descriptors []controlplane.WorkspaceBlob) int64 {
+	var total int64
+	for _, descriptor := range descriptors {
+		total += descriptor.CompressedSize
+	}
+	return total
+}
+
+func aggregateDescriptors(descriptors []controlplane.WorkspaceBlob) string {
+	hash := sha256.New()
+	for _, descriptor := range descriptors {
+		_, _ = io.WriteString(hash, descriptor.Key)
+		_, _ = hash.Write([]byte{0})
+		_, _ = io.WriteString(hash, descriptor.SHA256)
+		_, _ = hash.Write([]byte{0})
+		_, _ = io.WriteString(hash, fmt.Sprintf("%d:%d", descriptor.CompressedSize, descriptor.LogicalSize))
+		_, _ = hash.Write([]byte{0})
+		for _, path := range descriptor.Paths {
+			_, _ = io.WriteString(hash, path)
+			_, _ = hash.Write([]byte{0})
+		}
+		_, _ = hash.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func grantsByKey(response controlplane.WorkspaceGrantResponse, keys []string, method string) (map[string]controlplane.WorkspaceGrant, error) {
+	result, err := grantsByKeySubset(response, keys, method)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) != len(keys) {
+		return nil, errors.New("broker did not grant every required object")
+	}
+	return result, nil
+}
+
+func grantsByKeySubset(response controlplane.WorkspaceGrantResponse, allowed []string, method string) (map[string]controlplane.WorkspaceGrant, error) {
+	allowedKeys := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allowedKeys[key] = struct{}{}
+	}
+	result := make(map[string]controlplane.WorkspaceGrant, len(response.Grants))
+	for _, grant := range response.Grants {
+		if grant.Method != method {
+			return nil, errors.New("broker grant has unexpected HTTP method")
+		}
+		if _, allowed := allowedKeys[grant.Key]; !allowed {
+			return nil, errors.New("broker grant is for an unexpected object key")
+		}
+		if _, duplicate := result[grant.Key]; duplicate {
+			return nil, errors.New("broker returned duplicate object grant")
+		}
+		result[grant.Key] = grant
+	}
+	return result, nil
+}
+
+func oneGrant(response controlplane.WorkspaceGrantResponse, key, method string) (controlplane.WorkspaceGrant, error) {
+	grants, err := grantsByKey(response, []string{key}, method)
+	if err != nil {
+		return controlplane.WorkspaceGrant{}, err
+	}
+	return grants[key], nil
+}
+
+func workspacePrefix(command controlplane.Command) (string, error) {
+	prefix := strings.TrimSuffix(command.Workspace.ObjectPrefix, "/")
+	expected := "shared-hosting/" + command.AccountID + "/" + command.ServiceID
+	if prefix != expected || command.AccountID == "" || command.ServiceID == "" {
+		return "", errors.New("workspace prefix is not the assigned service prefix")
+	}
+	return prefix, nil
+}
+
+func manifestKey(prefix string, revision int64) string {
+	return strings.TrimSuffix(prefix, "/") + fmt.Sprintf("/revisions/%d/manifest.json", revision)
+}
+
+func workspaceLimit(command controlplane.Command) int64 {
+	limit := command.Resources.WorkspaceGiB * 1024 * 1024 * 1024
+	return limit
+}
+
+func validWorkspaceLimit(command controlplane.Command) bool {
+	return command.Resources.WorkspaceGiB >= 1 &&
+		command.Resources.WorkspaceGiB <= maxWorkspaceBytes/(1024*1024*1024)
+}
+
+func validDescriptor(value controlplane.WorkspaceBlob) bool {
+	return value.Key != "" && validSHA256(value.SHA256) &&
+		value.CompressedSize > 0 && value.CompressedSize <= maxBlobBytes &&
+		value.LogicalSize >= 0 && value.LogicalSize <= maxWorkspaceBytes &&
+		len(value.Paths) <= maxArchiveEntries
+}
+
+func sameArchive(left, right controlplane.WorkspaceBlob) bool {
+	return left.SHA256 == right.SHA256 &&
+		left.CompressedSize == right.CompressedSize &&
+		left.LogicalSize == right.LogicalSize &&
+		strings.Join(left.Paths, "\x00") == strings.Join(right.Paths, "\x00")
+}
+
+func validSHA256(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	if strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func validWorkspacePath(value string) bool {
+	if value == "" || len(value) > 1024 || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func isWorldPath(path string) bool {
+	return path == "world" || strings.HasPrefix(path, "world/") ||
+		path == "world_nether" || strings.HasPrefix(path, "world_nether/") ||
+		path == "world_the_end" || strings.HasPrefix(path, "world_the_end/")
+}
+
+func isConfigPath(path string) bool {
+	return path == "config" || strings.HasPrefix(path, "config/") ||
+		path == "defaultconfigs" || strings.HasPrefix(path, "defaultconfigs/")
+}
+
+func isContentPath(path string) bool {
+	return !isWorldPath(path) && !isConfigPath(path)
+}
+
+func allPaths(paths []string, predicate func(string) bool) bool {
+	for _, path := range paths {
+		if !predicate(path) {
+			return false
+		}
+	}
+	return true
+}
+
+func revisionLayerKey(prefix, key, name string) bool {
+	parts := strings.Split(strings.TrimPrefix(key, prefix+"/revisions/"), "/")
+	return strings.HasPrefix(key, prefix+"/revisions/") && len(parts) == 2 &&
+		parts[0] != "" && strings.TrimLeft(parts[0], "0123456789") == "" && parts[1] == name
+}
+
+func worldLayerKey(prefix, key string) bool {
+	parts := strings.Split(strings.TrimPrefix(key, prefix+"/revisions/"), "/")
+	if !strings.HasPrefix(key, prefix+"/revisions/") || len(parts) != 3 ||
+		parts[0] == "" || strings.TrimLeft(parts[0], "0123456789") != "" ||
+		parts[1] != "world" || !strings.HasSuffix(parts[2], ".tar.zst") {
+		return false
+	}
+	shard := strings.TrimSuffix(parts[2], ".tar.zst")
+	if shard == "" || len(shard) > 128 {
+		return false
+	}
+	for _, character := range shard {
+		if !(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z') &&
+			!(character >= '0' && character <= '9') && character != '.' && character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func safeChild(root, name string) (string, error) {
-	if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, "\\") {
-		return "", errors.New("path must be a relative slash-separated name")
-	}
-	for _, part := range strings.Split(name, "/") {
-		if part == "" || part == "." || part == ".." {
-			return "", errors.New("path contains an empty, dot, or traversal segment")
-		}
+	if !validWorkspacePath(name) {
+		return "", errors.New("path must be a safe relative slash-separated name")
 	}
 	child := filepath.Join(root, filepath.FromSlash(name))
 	relative, err := filepath.Rel(root, child)
@@ -526,73 +1048,52 @@ func safeChild(root, name string) (string, error) {
 	return child, nil
 }
 
-func cleanPrefix(prefix string) (string, error) {
-	prefix = strings.Trim(prefix, "/")
-	if prefix == "" {
-		return "", errors.New("workspace object prefix is required")
-	}
-	for _, segment := range strings.Split(prefix, "/") {
-		if segment == "" || segment == "." || segment == ".." || strings.Contains(segment, "\\") {
-			return "", errors.New("workspace object prefix is invalid")
-		}
-	}
-	return prefix, nil
-}
-
-func manifestKey(prefix string, revision int64) string {
-	return prefix + "/revisions/" + fmt.Sprintf("%d", revision) + "/manifest.json"
-}
-
-func fileKey(prefix string, revision int64, path string) string {
-	return prefix + "/revisions/" + fmt.Sprintf("%d", revision) + "/files/" + path
-}
-
-func (m *Manager) upload(ctx context.Context, key string, data []byte, contentType string) error {
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		if err = m.store.Upload(ctx, key, data, contentType); err == nil {
-			m.metrics.syncBytes.Add(int64(len(data)))
-			return nil
-		}
-		if attempt < 2 {
-			if waitErr := m.sleep(ctx, time.Duration(1<<attempt)*100*time.Millisecond); waitErr != nil {
-				return waitErr
-			}
-		}
+func replaceWorkspace(staging, workspacePath string) error {
+	backup, err := replaceWorkspaceWithBackup(staging, workspacePath)
+	if err == nil && backup != "" {
+		err = os.RemoveAll(backup)
 	}
 	return err
 }
 
-func (m *Manager) uploadFile(ctx context.Context, key, path string, expectedSize int64) error {
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		var uploaded int64
-		uploaded, err = m.store.UploadFile(ctx, key, path, "application/octet-stream")
-		if err == nil {
-			if uploaded != expectedSize {
-				return fmt.Errorf("uploaded size %d does not match expected size %d", uploaded, expectedSize)
-			}
-			m.metrics.syncBytes.Add(uploaded)
-			return nil
-		}
-		if attempt < 2 {
-			if waitErr := m.sleep(ctx, time.Duration(1<<attempt)*100*time.Millisecond); waitErr != nil {
-				return waitErr
-			}
+func replaceWorkspaceWithBackup(staging, workspacePath string) (string, error) {
+	backup := workspacePath + ".previous"
+	if err := os.RemoveAll(backup); err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(workspacePath); err == nil {
+		if err := os.Rename(workspacePath, backup); err != nil {
+			return "", fmt.Errorf("stage previous workspace: %w", err)
 		}
 	}
-	return err
+	if err := os.Rename(staging, workspacePath); err != nil {
+		if _, statErr := os.Stat(backup); statErr == nil {
+			_ = os.Rename(backup, workspacePath)
+		}
+		return "", fmt.Errorf("activate validated workspace: %w", err)
+	}
+	return backup, nil
 }
 
-func sleep(ctx context.Context, duration time.Duration) error {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
+func hashFile(path string, limit int64) (int64, string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, "", err
 	}
+	defer file.Close()
+	hash := sha256.New()
+	written, err := io.Copy(hash, io.LimitReader(file, limit+1))
+	if err != nil {
+		return written, "", err
+	}
+	if written > limit {
+		return written, "", errors.New("file exceeds configured limit")
+	}
+	return written, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func sortFiles(values []workspaceFile) {
+	sort.Slice(values, func(left, right int) bool { return values[left].path < values[right].path })
 }
 
 func validIdentifier(value string) bool {
@@ -613,15 +1114,13 @@ func digest(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func aggregateHash(files []File) string {
-	hash := sha256.New()
-	for _, file := range files {
-		_, _ = hash.Write([]byte(file.Path))
-		_, _ = hash.Write([]byte{0})
-		_, _ = hash.Write([]byte(fmt.Sprintf("%d", file.SizeBytes)))
-		_, _ = hash.Write([]byte{0})
-		_, _ = hash.Write([]byte(file.SHA256))
-		_, _ = hash.Write([]byte{'\n'})
+func sleep(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
-	return hex.EncodeToString(hash.Sum(nil))
 }

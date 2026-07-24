@@ -27,6 +27,7 @@ const maxControlPlaneResponseBytes = 1 << 20
 type Client struct {
 	baseURL             *url.URL
 	nodeID              string
+	region              string
 	bootstrapCredential string
 	credentialPath      string
 	httpClient          *http.Client
@@ -41,6 +42,7 @@ type Client struct {
 type ClientOptions struct {
 	BaseURL             string
 	NodeID              string
+	Region              string
 	BootstrapCredential string
 	CredentialPath      string
 	HTTPClient          *http.Client
@@ -62,8 +64,8 @@ func NewClient(options ClientOptions) (*Client, error) {
 	if options.NodeID == "" {
 		return nil, errors.New("control-plane node ID is required")
 	}
-	if options.BootstrapCredential == "" {
-		return nil, errors.New("control-plane bootstrap credential is required")
+	if !validRegion(options.Region) {
+		return nil, errors.New("control-plane shared-node region is invalid")
 	}
 	if options.CredentialPath == "" {
 		return nil, errors.New("control-plane credential path is required")
@@ -82,6 +84,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 	client := &Client{
 		baseURL:             baseURL,
 		nodeID:              options.NodeID,
+		region:              options.Region,
 		bootstrapCredential: options.BootstrapCredential,
 		credentialPath:      options.CredentialPath,
 		httpClient:          httpClient,
@@ -103,12 +106,18 @@ func NewClient(options ClientOptions) (*Client, error) {
 	} else {
 		client.credential = credential
 	}
+	if client.credential == "" && client.bootstrapCredential == "" {
+		return nil, errors.New("control-plane bootstrap credential is required without a persisted node credential")
+	}
 	return client, nil
 }
 
 // Register uses the bootstrap credential and atomically replaces any previous
 // node credential with the short-lived credential issued by the control plane.
 func (c *Client) Register(ctx context.Context, capacity NodeCapacity) error {
+	if c.bootstrapCredential == "" {
+		return errors.New("control-plane bootstrap credential is unavailable")
+	}
 	body, err := json.Marshal(struct {
 		NodeID            string `json:"nodeId"`
 		Region            string `json:"region"`
@@ -116,7 +125,7 @@ func (c *Client) Register(ctx context.Context, capacity NodeCapacity) error {
 		TotalSharedCPU    int64  `json:"totalSharedCpu"`
 		TotalWorkspaceGiB int64  `json:"totalWorkspaceGiB"`
 	}{
-		NodeID: c.nodeID, Region: "taipei", TotalMemoryMiB: capacity.TotalMemoryMiB,
+		NodeID: c.nodeID, Region: c.region, TotalMemoryMiB: capacity.TotalMemoryMiB,
 		TotalSharedCPU: capacity.TotalSharedCPU, TotalWorkspaceGiB: capacity.TotalWorkspaceGiB,
 	})
 	if err != nil {
@@ -139,11 +148,15 @@ func (c *Client) Register(ctx context.Context, capacity NodeCapacity) error {
 	return c.setCredential(registered.Credential)
 }
 
-// Heartbeat follows the current wire contract, whose endpoint authenticates an
-// empty body. Status is retained in the Reporter interface for compatibility
-// with a future heartbeat payload.
-func (c *Client) Heartbeat(ctx context.Context, _ NodeStatus) error {
-	_, err := c.sendNode(ctx, "/v1/internal/shared-nodes/"+c.nodeID+"/heartbeat", nil)
+func (c *Client) Heartbeat(ctx context.Context, status NodeStatus) error {
+	if !status.Valid() {
+		return errors.New("invalid shared-node heartbeat status")
+	}
+	body, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("encode heartbeat: %w", err)
+	}
+	_, err = c.sendNode(ctx, "/v1/internal/shared-nodes/"+c.nodeID+"/heartbeat", body)
 	return err
 }
 
@@ -160,7 +173,7 @@ func (c *Client) Next(ctx context.Context, nodeID string) (Command, error) {
 		var next struct {
 			Command         *wireCommand `json:"command"`
 			LeaseToken      string       `json:"leaseToken"`
-			LeaseGeneration string       `json:"leaseGeneration"`
+			LeaseGeneration int64        `json:"leaseGeneration"`
 			LeaseExpiresAt  string       `json:"leaseExpiresAt"`
 		}
 		if err := json.Unmarshal(response, &next); err != nil {
@@ -174,7 +187,7 @@ func (c *Client) Next(ctx context.Context, nodeID string) (Command, error) {
 			if next.LeaseToken != "" {
 				command.Lease.Token = next.LeaseToken
 			}
-			if next.LeaseGeneration != "" {
+			if next.LeaseGeneration != 0 {
 				command.Lease.Generation = next.LeaseGeneration
 			}
 			if next.LeaseExpiresAt != "" {
@@ -194,17 +207,27 @@ func (c *Client) Next(ctx context.Context, nodeID string) (Command, error) {
 	}
 }
 
-// Ack follows the current endpoint contract, which records an acknowledgement
-// without a result payload.
-func (c *Client) Ack(ctx context.Context, commandID string, _ CommandResult) error {
-	_, err := c.sendNode(ctx, "/v1/internal/shared-nodes/"+c.nodeID+"/commands/"+commandID+"/ack", nil)
+// Ack records an acknowledgement for the currently issued command lease.
+func (c *Client) Ack(ctx context.Context, commandID string, lease CommandLease, _ CommandResult) error {
+	if lease.Token == "" || lease.Generation < 1 {
+		return errors.New("cannot acknowledge a command without a lease token and generation")
+	}
+	body, err := json.Marshal(struct {
+		Token      string `json:"leaseToken"`
+		Generation int64  `json:"leaseGeneration"`
+	}{Token: lease.Token, Generation: lease.Generation})
+	if err != nil {
+		return fmt.Errorf("encode acknowledgement: %w", err)
+	}
+	_, err = c.sendNode(ctx, "/v1/internal/shared-nodes/"+c.nodeID+"/commands/"+commandID+"/ack", body)
 	return err
 }
 
-func (c *Client) ReportStarted(ctx context.Context, serviceID, assignmentID string) error {
+func (c *Client) ReportStarted(ctx context.Context, serviceID, assignmentID string, endpoint Endpoint) error {
 	body, err := json.Marshal(struct {
-		ServiceID string `json:"serviceId"`
-	}{ServiceID: serviceID})
+		ServiceID string   `json:"serviceId"`
+		Endpoint  Endpoint `json:"endpoint"`
+	}{ServiceID: serviceID, Endpoint: endpoint})
 	if err != nil {
 		return fmt.Errorf("encode started report: %w", err)
 	}
@@ -213,13 +236,21 @@ func (c *Client) ReportStarted(ctx context.Context, serviceID, assignmentID stri
 }
 
 func (c *Client) ReportStoppedAndSynced(ctx context.Context, result SyncResult) error {
+	if result.CommandID == "" || result.Lease.Token == "" || result.Lease.Generation < 1 {
+		return errors.New("stopped-and-synced report requires the current command lease")
+	}
 	body, err := json.Marshal(struct {
-		ServiceID string `json:"serviceId"`
-		Revision  int64  `json:"revision"`
-		SizeBytes int64  `json:"sizeBytes"`
-		SHA256    string `json:"sha256,omitempty"`
+		ServiceID       string `json:"serviceId"`
+		CommandID       string `json:"commandId"`
+		LeaseToken      string `json:"leaseToken"`
+		LeaseGeneration int64  `json:"leaseGeneration"`
+		Revision        int64  `json:"revision"`
+		SizeBytes       int64  `json:"sizeBytes"`
+		SHA256          string `json:"sha256,omitempty"`
 	}{
-		ServiceID: result.ServiceID, Revision: result.Revision, SizeBytes: result.SizeBytes, SHA256: result.ManifestSHA,
+		ServiceID: result.ServiceID, CommandID: result.CommandID,
+		LeaseToken: result.Lease.Token, LeaseGeneration: result.Lease.Generation,
+		Revision: result.Revision, SizeBytes: result.SizeBytes, SHA256: result.ManifestSHA,
 	})
 	if err != nil {
 		return fmt.Errorf("encode stopped-and-synced report: %w", err)
@@ -228,14 +259,17 @@ func (c *Client) ReportStoppedAndSynced(ctx context.Context, result SyncResult) 
 	return err
 }
 
-// RenewLease supports the planned lease endpoint. It is safe to call only when
-// a token or generation was issued; control planes without the endpoint return
-// their normal HTTP error and no acknowledgement is sent by this client.
+// RenewLease extends the current command lease. The control plane currently
+// returns only leaseExpiresAt, so token and generation are retained unless a
+// future response explicitly replaces them.
 func (c *Client) RenewLease(ctx context.Context, commandID string, lease CommandLease) (CommandLease, error) {
-	if lease.Token == "" && lease.Generation == "" {
-		return CommandLease{}, errors.New("cannot renew a command without lease fields")
+	if lease.Token == "" || lease.Generation < 1 {
+		return CommandLease{}, errors.New("cannot renew a command without a lease token and generation")
 	}
-	body, err := json.Marshal(lease)
+	body, err := json.Marshal(struct {
+		Token      string `json:"leaseToken"`
+		Generation int64  `json:"leaseGeneration"`
+	}{Token: lease.Token, Generation: lease.Generation})
 	if err != nil {
 		return CommandLease{}, fmt.Errorf("encode lease renewal: %w", err)
 	}
@@ -244,18 +278,102 @@ func (c *Client) RenewLease(ctx context.Context, commandID string, lease Command
 		return CommandLease{}, err
 	}
 	var renewed struct {
-		CommandLease
-		Credential string `json:"credential"`
+		Token      *string `json:"leaseToken"`
+		Generation *int64  `json:"leaseGeneration"`
+		ExpiresAt  string  `json:"leaseExpiresAt"`
 	}
 	if err := json.Unmarshal(response, &renewed); err != nil {
 		return CommandLease{}, fmt.Errorf("decode lease renewal response: %w", err)
 	}
-	if renewed.Credential != "" {
-		if err := c.setCredential(renewed.Credential); err != nil {
-			return CommandLease{}, err
-		}
+	if renewed.ExpiresAt == "" {
+		return CommandLease{}, errors.New("lease renewal response is missing lease expiry")
 	}
-	return renewed.CommandLease, nil
+	if renewed.Token != nil {
+		lease.Token = *renewed.Token
+	}
+	if renewed.Generation != nil {
+		lease.Generation = *renewed.Generation
+	}
+	lease.ExpiresAt = renewed.ExpiresAt
+	return lease, nil
+}
+
+// HasCredential reports whether a locally validated node credential was loaded
+// or issued. It deliberately does not claim that the remote control plane still
+// accepts the credential.
+func (c *Client) HasCredential() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.credential != ""
+}
+
+// IsAuthenticationFailure identifies the only response statuses that may
+// safely trigger credential invalidation and re-enrollment.
+func (c *Client) IsAuthenticationFailure(err error) bool {
+	var responseError *HTTPError
+	return errors.As(err, &responseError) &&
+		(responseError.StatusCode == http.StatusUnauthorized || responseError.StatusCode == http.StatusForbidden)
+}
+
+// InvalidateCredential removes a credential only after an explicit remote
+// authentication rejection. It never logs or returns the credential value.
+func (c *Client) InvalidateCredential() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := os.Remove(c.credentialPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove rejected control-plane credential: %w", err)
+	}
+	c.credential = ""
+	return nil
+}
+
+func (c *Client) RestoreWorkspaceGrants(ctx context.Context, command Command, stage string, keys []string) (WorkspaceGrantResponse, error) {
+	return c.workspaceGrants(ctx, "restore", command, stage, keys, nil, "")
+}
+
+func (c *Client) SyncWorkspaceGrants(ctx context.Context, command Command, manifest WorkspaceManifest, manifestSHA256 string) (WorkspaceGrantResponse, error) {
+	return c.workspaceGrants(ctx, "sync", command, "", nil, &manifest, manifestSHA256)
+}
+
+func (c *Client) PublishWorkspaceGrant(ctx context.Context, command Command, manifest WorkspaceManifest, manifestSHA256 string) (WorkspaceGrantResponse, error) {
+	return c.workspaceGrants(ctx, "publish", command, "", nil, &manifest, manifestSHA256)
+}
+
+func (c *Client) workspaceGrants(ctx context.Context, operation string, command Command, stage string, keys []string, manifest *WorkspaceManifest, manifestSHA256 string) (WorkspaceGrantResponse, error) {
+	if command.CommandID == "" || command.AssignmentID == "" || command.Lease.Token == "" || command.Lease.Generation < 1 {
+		return WorkspaceGrantResponse{}, errors.New("workspace grant requires a currently leased command")
+	}
+	body, err := json.Marshal(struct {
+		ContractVersion int                `json:"contractVersion"`
+		CommandID       string             `json:"commandId"`
+		AssignmentID    string             `json:"assignmentId"`
+		LeaseToken      string             `json:"leaseToken"`
+		LeaseGeneration int64              `json:"leaseGeneration"`
+		Stage           string             `json:"stage,omitempty"`
+		Keys            []string           `json:"keys,omitempty"`
+		Manifest        *WorkspaceManifest `json:"manifest,omitempty"`
+		ManifestSHA256  string             `json:"manifestSha256,omitempty"`
+	}{
+		ContractVersion: WorkspaceGrantContractVersion,
+		CommandID:       command.CommandID, AssignmentID: command.AssignmentID,
+		LeaseToken: command.Lease.Token, LeaseGeneration: command.Lease.Generation,
+		Stage: stage, Keys: keys, Manifest: manifest, ManifestSHA256: manifestSHA256,
+	})
+	if err != nil {
+		return WorkspaceGrantResponse{}, fmt.Errorf("encode workspace grant request: %w", err)
+	}
+	response, err := c.sendNode(ctx, "/v1/internal/shared-nodes/"+c.nodeID+"/workspace-grants/"+operation, body)
+	if err != nil {
+		return WorkspaceGrantResponse{}, err
+	}
+	var grants WorkspaceGrantResponse
+	if err := json.Unmarshal(response, &grants); err != nil {
+		return WorkspaceGrantResponse{}, fmt.Errorf("decode workspace grant response: %w", err)
+	}
+	if grants.ContractVersion != WorkspaceGrantContractVersion {
+		return WorkspaceGrantResponse{}, errors.New("workspace grant response has an unsupported contract version")
+	}
+	return grants, nil
 }
 
 func (c *Client) sendNode(ctx context.Context, path string, body []byte) ([]byte, error) {
@@ -370,6 +488,22 @@ func validateCredential(nodeID, credential string) error {
 	return nil
 }
 
+func validRegion(value string) bool {
+	if len(value) < 1 || len(value) > 32 {
+		return false
+	}
+	for index, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') {
+			continue
+		}
+		if character == '-' && index > 0 && index < len(value)-1 {
+			continue
+		}
+		return false
+	}
+	return value[len(value)-1] != '-'
+}
+
 func randomNonce() (string, error) {
 	value := make([]byte, 16)
 	if _, err := rand.Read(value); err != nil {
@@ -381,10 +515,11 @@ func randomNonce() (string, error) {
 type wireCommand struct {
 	Command
 	LeaseToken      string `json:"leaseToken"`
-	LeaseGeneration string `json:"leaseGeneration"`
+	LeaseGeneration int64  `json:"leaseGeneration"`
 	LeaseExpiresAt  string `json:"leaseExpiresAt"`
 }
 
 var _ CommandSource = (*Client)(nil)
 var _ Reporter = (*Client)(nil)
 var _ LeaseRenewer = (*Client)(nil)
+var _ WorkspaceGrantClient = (*Client)(nil)

@@ -52,8 +52,9 @@ func (r *fakeRuntime) Running(context.Context) ([]RunningService, error) { retur
 func testCommand(kind, id, node, assignment string) controlplane.Command {
 	return controlplane.Command{
 		CommandID: id, Kind: kind, NodeID: node, ServiceID: "service_1", AssignmentID: assignment,
-		Workspace: controlplane.Workspace{ObjectPrefix: "services/service_1", Revision: 1},
-		Resources: controlplane.Resources{MemoryMiB: 512, SharedCPU: 1, BurstCPU: 1, WorkspaceGiB: 1},
+		Workspace:  controlplane.Workspace{ObjectPrefix: "services/service_1", Revision: 1},
+		Resources:  controlplane.Resources{MemoryMiB: 512, SharedCPU: 1, BurstCPU: 1, WorkspaceGiB: 1},
+		Connection: &controlplane.Connection{Host: "public-node.example", HostPort: 25565},
 	}
 }
 
@@ -99,6 +100,24 @@ func TestDifferentAssignmentIsRejectedWhileServiceActive(t *testing.T) {
 	}
 	if result.Status != "failed" || workspace.restores != 1 || runtime.starts != 1 {
 		t.Fatalf("different assignment was not rejected safely: %#v", result)
+	}
+}
+
+func TestRestoreRejectsCommandWithoutAssignedConnection(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, runtime := &fakeWorkspace{}, &fakeRuntime{}
+	executor := NewExecutor("node_1", store, workspace, runtime)
+	command := testCommand(controlplane.RestoreAndStart, "start_1", "node_1", "assignment_1")
+	command.Connection = nil
+	result, err := executor.Execute(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "failed" || workspace.restores != 0 || runtime.starts != 0 {
+		t.Fatalf("missing assigned connection was not rejected: %#v", result)
 	}
 }
 
@@ -163,6 +182,9 @@ func TestDaemonDoesNotReportStopBeforeSuccessfulSync(t *testing.T) {
 	daemon := Daemon{NodeID: "node_1", Source: gateway, Reporter: gateway, Executor: executor}
 	if err := daemon.Process(context.Background(), testCommand(controlplane.RestoreAndStart, "start_1", "node_1", "assignment_1")); err != nil {
 		t.Fatal(err)
+	}
+	if len(gateway.Started) != 1 || gateway.Started[0].Endpoint != (controlplane.Endpoint{Host: "public-node.example", Port: 25565}) {
+		t.Fatalf("started endpoint = %#v", gateway.Started)
 	}
 	if err := daemon.Process(context.Background(), testCommand(controlplane.StopAndSync, "stop_1", "node_1", "assignment_1")); err != nil {
 		t.Fatal(err)
