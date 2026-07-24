@@ -13,7 +13,8 @@ EnvironmentFile=/etc/xmcl-shared-node-agent.env
 ExecStart=/usr/local/bin/xmcl-shared-node-agent
 Restart=on-failure
 RestartSec=5
-NoNewPrivileges=yes
+# The only privilege elevation is the root-owned 4750 xmcl-quota-helper.
+NoNewPrivileges=no
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict

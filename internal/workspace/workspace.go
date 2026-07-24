@@ -1,12 +1,14 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -22,11 +24,18 @@ import (
 
 type ObjectStore interface {
 	Download(ctx context.Context, key string) ([]byte, error)
+	DownloadTo(ctx context.Context, key string, destination io.Writer) (int64, error)
 	Exists(ctx context.Context, key string) (bool, error)
 	Upload(ctx context.Context, key string, data []byte, contentType string) error
+	UploadFile(ctx context.Context, key, path, contentType string) (int64, error)
 	List(ctx context.Context, prefix string) ([]objectstore.ObjectInfo, error)
 	Delete(ctx context.Context, key string) error
 }
+
+const (
+	maxManifestBytes  int64 = 1 << 20
+	maxWorkspaceBytes int64 = 64 << 30
+)
 
 type File struct {
 	Path      string `json:"path"`
@@ -99,10 +108,30 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 		return "", err
 	}
 	manifestKey := manifestKey(prefix, command.Workspace.Revision)
-	manifestData, err := m.store.Download(ctx, manifestKey)
+	manifestExists, err := m.store.Exists(ctx, manifestKey)
+	if err != nil {
+		return "", fmt.Errorf("check workspace manifest: %w", err)
+	}
+	if !manifestExists {
+		if command.Workspace.Revision != 0 {
+			return "", errors.New("workspace manifest is required for revisions greater than zero")
+		}
+		workspacePath, err := m.activateEmptyWorkspace(command, workspacePath)
+		if err != nil {
+			return "", err
+		}
+		if err := m.quota.Apply(ctx, workspacePath, command.Resources.WorkspaceGiB); err != nil {
+			return "", fmt.Errorf("apply workspace quota: %w", err)
+		}
+		m.metrics.logicalBytes.Store(0)
+		success = true
+		return workspacePath, nil
+	}
+	manifestData, err := m.downloadManifest(ctx, manifestKey)
 	if err != nil {
 		return "", fmt.Errorf("download workspace manifest: %w", err)
 	}
+
 	m.metrics.restoreBytes.Add(int64(len(manifestData)))
 	var manifest Manifest
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
@@ -132,19 +161,16 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 		if err != nil {
 			return "", err
 		}
-		data, err := m.store.Download(ctx, fileKey(prefix, command.Workspace.Revision, file.Path))
-		if err != nil {
-			return "", fmt.Errorf("download workspace file %q: %w", file.Path, err)
-		}
-		m.metrics.restoreBytes.Add(int64(len(data)))
-		if int64(len(data)) != file.SizeBytes || digest(data) != file.SHA256 {
-			return "", fmt.Errorf("workspace file %q does not match its manifest hash", file.Path)
-		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			return "", fmt.Errorf("create workspace directory: %w", err)
 		}
-		if err := os.WriteFile(target, data, 0o640); err != nil {
-			return "", fmt.Errorf("write workspace file: %w", err)
+		dataSize, dataHash, err := m.downloadFile(ctx, fileKey(prefix, command.Workspace.Revision, file.Path), target, file.SizeBytes)
+		if err != nil {
+			return "", fmt.Errorf("download workspace file %q: %w", file.Path, err)
+		}
+		m.metrics.restoreBytes.Add(dataSize)
+		if dataSize != file.SizeBytes || dataHash != file.SHA256 {
+			return "", fmt.Errorf("workspace file %q does not match its manifest hash", file.Path)
 		}
 	}
 	if err := os.RemoveAll(workspacePath); err != nil {
@@ -159,6 +185,25 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 	}
 	m.metrics.logicalBytes.Store(manifest.SizeBytes)
 	success = true
+	return workspacePath, nil
+}
+
+func (m *Manager) activateEmptyWorkspace(command controlplane.Command, workspacePath string) (string, error) {
+	staging := filepath.Join(m.root, ".staging", command.ServiceID+"-"+command.CommandID)
+	if err := os.RemoveAll(staging); err != nil {
+		return "", fmt.Errorf("clean empty workspace staging directory: %w", err)
+	}
+	if err := os.MkdirAll(staging, 0o750); err != nil {
+		return "", fmt.Errorf("create empty workspace staging directory: %w", err)
+	}
+	if err := os.RemoveAll(workspacePath); err != nil {
+		_ = os.RemoveAll(staging)
+		return "", fmt.Errorf("replace previous workspace: %w", err)
+	}
+	if err := os.Rename(staging, workspacePath); err != nil {
+		_ = os.RemoveAll(staging)
+		return "", fmt.Errorf("activate empty workspace: %w", err)
+	}
 	return workspacePath, nil
 }
 
@@ -188,7 +233,7 @@ func (m *Manager) Sync(ctx context.Context, command controlplane.Command) (contr
 		return controlplane.SyncResult{}, fmt.Errorf("check existing revision manifest: %w", err)
 	}
 	if exists {
-		data, err := m.store.Download(ctx, manifestObjectKey)
+		data, err := m.downloadManifest(ctx, manifestObjectKey)
 		if err != nil {
 			return controlplane.SyncResult{}, fmt.Errorf("read existing revision manifest: %w", err)
 		}
@@ -215,14 +260,15 @@ func (m *Manager) Sync(ctx context.Context, command controlplane.Command) (contr
 		Files:         make([]File, 0, len(files)),
 	}
 	for _, path := range files {
-		data, err := os.ReadFile(filepath.Join(workspacePath, filepath.FromSlash(path)))
+		localPath := filepath.Join(workspacePath, filepath.FromSlash(path))
+		size, fileHash, err := hashFile(localPath)
 		if err != nil {
 			return controlplane.SyncResult{}, fmt.Errorf("read workspace file %q: %w", path, err)
 		}
-		file := File{Path: path, SizeBytes: int64(len(data)), SHA256: digest(data)}
+		file := File{Path: path, SizeBytes: size, SHA256: fileHash}
 		manifest.Files = append(manifest.Files, file)
 		manifest.SizeBytes += file.SizeBytes
-		if err := m.upload(ctx, fileKey(prefix, revision, path), data, "application/octet-stream"); err != nil {
+		if err := m.uploadFile(ctx, fileKey(prefix, revision, path), localPath, file.SizeBytes); err != nil {
 			return controlplane.SyncResult{}, fmt.Errorf("upload workspace file %q: %w", path, err)
 		}
 	}
@@ -338,19 +384,91 @@ func validateManifest(manifest Manifest, command controlplane.Command) error {
 	}
 
 	var size int64
+	workspaceLimit := command.Resources.WorkspaceGiB * 1024 * 1024 * 1024
+	if workspaceLimit < 1 || workspaceLimit > maxWorkspaceBytes {
+		workspaceLimit = maxWorkspaceBytes
+	}
 	for _, file := range manifest.Files {
 		if _, err := safeChild(string(filepath.Separator), file.Path); err != nil {
 			return fmt.Errorf("invalid workspace manifest path %q: %w", file.Path, err)
 		}
-		if file.SizeBytes < 0 || len(file.SHA256) != sha256.Size*2 {
+		if file.SizeBytes < 0 || file.SizeBytes > maxWorkspaceBytes || len(file.SHA256) != sha256.Size*2 {
 			return fmt.Errorf("invalid workspace manifest file %q", file.Path)
 		}
 		size += file.SizeBytes
 	}
-	if size != manifest.SizeBytes || aggregateHash(manifest.Files) != manifest.SHA256 {
+	if size > workspaceLimit || size != manifest.SizeBytes || aggregateHash(manifest.Files) != manifest.SHA256 {
 		return errors.New("workspace manifest aggregate hash or size is invalid")
 	}
+
 	return nil
+}
+
+func (m *Manager) downloadManifest(ctx context.Context, key string) ([]byte, error) {
+	var buffer bytes.Buffer
+	writer := &limitedWriter{writer: &buffer, remaining: maxManifestBytes}
+	if _, err := m.store.DownloadTo(ctx, key, writer); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+func (m *Manager) downloadFile(ctx context.Context, key, path string, expectedSize int64) (int64, string, error) {
+	if expectedSize < 0 || expectedSize > maxWorkspaceBytes {
+		return 0, "", errors.New("workspace file exceeds the configured maximum")
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o640)
+	if err != nil {
+		return 0, "", err
+	}
+	hash := sha256.New()
+	writer := &limitedWriter{writer: io.MultiWriter(file, hash), remaining: expectedSize}
+	size, downloadErr := m.store.DownloadTo(ctx, key, writer)
+	closeErr := file.Close()
+	if downloadErr != nil {
+		_ = os.Remove(path)
+		return size, "", downloadErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
+		return size, "", closeErr
+	}
+	return size, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func hashFile(path string) (int64, string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, "", err
+	}
+	if info.Size() > maxWorkspaceBytes {
+		return 0, "", errors.New("workspace file exceeds the configured maximum")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	size, err := io.Copy(hash, file)
+	if err != nil {
+		return size, "", err
+	}
+	return size, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+type limitedWriter struct {
+	writer    io.Writer
+	remaining int64
+}
+
+func (w *limitedWriter) Write(data []byte) (int, error) {
+	if int64(len(data)) > w.remaining {
+		return 0, errors.New("object exceeds configured transfer limit")
+	}
+	count, err := w.writer.Write(data)
+	w.remaining -= int64(count)
+	return count, err
 }
 
 func validatePublishedManifest(manifest Manifest, command controlplane.Command, revision int64) error {
@@ -434,6 +552,27 @@ func (m *Manager) upload(ctx context.Context, key string, data []byte, contentTy
 	for attempt := 0; attempt < 3; attempt++ {
 		if err = m.store.Upload(ctx, key, data, contentType); err == nil {
 			m.metrics.syncBytes.Add(int64(len(data)))
+			return nil
+		}
+		if attempt < 2 {
+			if waitErr := m.sleep(ctx, time.Duration(1<<attempt)*100*time.Millisecond); waitErr != nil {
+				return waitErr
+			}
+		}
+	}
+	return err
+}
+
+func (m *Manager) uploadFile(ctx context.Context, key, path string, expectedSize int64) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		var uploaded int64
+		uploaded, err = m.store.UploadFile(ctx, key, path, "application/octet-stream")
+		if err == nil {
+			if uploaded != expectedSize {
+				return fmt.Errorf("uploaded size %d does not match expected size %d", uploaded, expectedSize)
+			}
+			m.metrics.syncBytes.Add(uploaded)
 			return nil
 		}
 		if attempt < 2 {

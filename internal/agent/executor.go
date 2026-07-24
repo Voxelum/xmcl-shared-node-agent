@@ -63,6 +63,7 @@ func (e *Executor) Execute(ctx context.Context, command controlplane.Command) (c
 	} else if ok {
 		return result, nil
 	}
+
 	lock := e.serviceLock(command.ServiceID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -81,6 +82,17 @@ func (e *Executor) Execute(ctx context.Context, command controlplane.Command) (c
 		return controlplane.CommandResult{}, err
 	}
 	return result, nil
+}
+
+func (e *Executor) TrackLease(commandID string, lease controlplane.CommandLease) error {
+	if lease.Token == "" && lease.Generation == "" {
+		return nil
+	}
+	return e.store.SetLease(commandID, lease)
+}
+
+func (e *Executor) ClearLease(commandID string) error {
+	return e.store.ClearLease(commandID)
 }
 
 // Reconcile refuses to take ownership of a locally running container that is

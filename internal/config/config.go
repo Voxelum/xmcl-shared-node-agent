@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,11 +13,11 @@ type Config struct {
 	NodeID                 string
 	ControlPlaneURL        string
 	ControlPlaneCredential string
-	S3Endpoint             string
-	S3Region               string
-	S3Bucket               string
-	S3AccessKey            string
-	S3SecretKey            string
+	ObjectStorageEndpoint  string
+	ObjectStorageRegion    string
+	ObjectStorageBucket    string
+	ObjectStorageAccessKey string
+	ObjectStorageSecretKey string
 	WorkspaceRoot          string
 	StateRoot              string
 	ContainerImage         string
@@ -58,29 +59,24 @@ func Load() (Config, error) {
 		{"XMCL_SHARED_NODE_ID", &c.NodeID},
 		{"XMCL_CONTROL_PLANE_URL", &c.ControlPlaneURL},
 		{"XMCL_CONTROL_PLANE_CREDENTIAL", &c.ControlPlaneCredential},
-		{"XMCL_S3_ENDPOINT", &c.S3Endpoint},
-		{"XMCL_S3_REGION", &c.S3Region},
-		{"XMCL_S3_BUCKET", &c.S3Bucket},
-		{"XMCL_S3_ACCESS_KEY", &c.S3AccessKey},
-		{"XMCL_S3_SECRET_KEY", &c.S3SecretKey},
+		{"XMCL_VULTR_OBJECT_STORAGE_ENDPOINT", &c.ObjectStorageEndpoint},
+		{"XMCL_VULTR_OBJECT_STORAGE_REGION", &c.ObjectStorageRegion},
+		{"XMCL_VULTR_OBJECT_STORAGE_BUCKET", &c.ObjectStorageBucket},
+		{"XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY", &c.ObjectStorageAccessKey},
+		{"XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY", &c.ObjectStorageSecretKey},
+		{"XMCL_WORKSPACE_ROOT", &c.WorkspaceRoot},
+		{"XMCL_STATE_ROOT", &c.StateRoot},
 		{"XMCL_CONTAINER_IMAGE", &c.ContainerImage},
 		{"XMCL_QUOTA_MOUNT_PATH", &c.QuotaMountPath},
+		{"XMCL_METRICS_ADDR", &c.MetricsAddr},
 	} {
 		if *field.target, err = required(field.name); err != nil {
 			return Config{}, err
 		}
 	}
-	c.WorkspaceRoot = os.Getenv("XMCL_WORKSPACE_ROOT")
-	if c.WorkspaceRoot == "" {
-		c.WorkspaceRoot = "/var/lib/xmcl-shared/workspaces"
-	}
 	c.WorkspaceRoot, err = filepath.Abs(c.WorkspaceRoot)
 	if err != nil {
 		return Config{}, fmt.Errorf("resolve workspace root: %w", err)
-	}
-	c.StateRoot = os.Getenv("XMCL_STATE_ROOT")
-	if c.StateRoot == "" {
-		c.StateRoot = filepath.Join(filepath.Dir(c.WorkspaceRoot), "agent-state")
 	}
 	c.StateRoot, err = filepath.Abs(c.StateRoot)
 	if err != nil {
@@ -105,9 +101,9 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("XMCL_QUOTA_PROJECT_BASE must be an unsigned 32-bit integer")
 	}
 	c.QuotaProjectBase = uint32(projectBase)
-	c.MetricsAddr = os.Getenv("XMCL_METRICS_ADDR")
-	if c.MetricsAddr == "" {
-		c.MetricsAddr = "127.0.0.1:9464"
+	host, _, err := net.SplitHostPort(c.MetricsAddr)
+	if err != nil || (host != "127.0.0.1" && host != "::1" && host != "[::1]" && host != "localhost") {
+		return Config{}, fmt.Errorf("XMCL_METRICS_ADDR must bind to a loopback address")
 	}
 	return c, nil
 }

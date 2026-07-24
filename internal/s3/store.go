@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/minio/minio-go/v7"
@@ -41,16 +42,24 @@ func (s *Store) Validate(ctx context.Context) error {
 }
 
 func (s *Store) Download(ctx context.Context, key string) ([]byte, error) {
+	var data bytes.Buffer
+	if _, err := s.DownloadTo(ctx, key, &data); err != nil {
+		return nil, err
+	}
+	return data.Bytes(), nil
+}
+
+func (s *Store) DownloadTo(ctx context.Context, key string, destination io.Writer) (int64, error) {
 	object, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("open S3 object: %w", err)
+		return 0, fmt.Errorf("open S3 object: %w", err)
 	}
 	defer object.Close()
-	data, err := io.ReadAll(object)
+	size, err := io.Copy(destination, object)
 	if err != nil {
-		return nil, fmt.Errorf("read S3 object: %w", err)
+		return size, fmt.Errorf("read S3 object: %w", err)
 	}
-	return data, nil
+	return size, nil
 }
 
 func (s *Store) Exists(ctx context.Context, key string) (bool, error) {
@@ -72,6 +81,25 @@ func (s *Store) Upload(ctx context.Context, key string, data []byte, contentType
 		return fmt.Errorf("upload S3 object: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) UploadFile(ctx context.Context, key, path, contentType string) (int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("open upload file: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat upload file: %w", err)
+	}
+	result, err := s.client.PutObject(ctx, s.bucket, key, file, info.Size(), minio.PutObjectOptions{
+		ContentType: contentType,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("upload S3 file: %w", err)
+	}
+	return result.Size, nil
 }
 
 func (s *Store) List(ctx context.Context, prefix string) ([]objectstore.ObjectInfo, error) {

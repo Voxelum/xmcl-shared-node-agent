@@ -26,4 +26,11 @@ func TestBuildCreateRequestHardensContainer(t *testing.T) {
 	if len(host.SecurityOpt) != 1 || host.SecurityOpt[0] != "no-new-privileges:true" || host.Resources.PidsLimit == nil {
 		t.Fatalf("security settings missing: %#v", host)
 	}
+	if host.NetworkMode != privateNetwork || len(host.PortBindings) != 1 || config.ExposedPorts["25565/tcp"] != struct{}{} {
+		t.Fatalf("Minecraft ingress is not configured: %#v %#v", config.ExposedPorts, host.PortBindings)
+	}
+	first := deterministicHostPort(command.AssignmentID)
+	if first != deterministicHostPort(command.AssignmentID) || first < 25565 || first > 35564 {
+		t.Fatalf("host port must be deterministic and in the assigned range: %d", first)
+	}
 }

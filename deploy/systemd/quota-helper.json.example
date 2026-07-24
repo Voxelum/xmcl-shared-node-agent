@@ -1,0 +1,5 @@
+{
+  "workspaceRoot": "/var/lib/xmcl-shared/workspaces",
+  "mountPath": "/var/lib/xmcl-shared",
+  "projectBase": 1000
+}

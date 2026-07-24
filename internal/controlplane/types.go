@@ -27,14 +27,24 @@ type Resources struct {
 }
 
 type Command struct {
-	CommandID    string    `json:"commandId"`
-	Kind         string    `json:"kind"`
-	NodeID       string    `json:"nodeId"`
-	ServiceID    string    `json:"serviceId"`
-	AssignmentID string    `json:"assignmentId"`
-	AccountID    string    `json:"accountId"`
-	Workspace    Workspace `json:"workspace"`
-	Resources    Resources `json:"resources"`
+	CommandID    string       `json:"commandId"`
+	Kind         string       `json:"kind"`
+	NodeID       string       `json:"nodeId"`
+	ServiceID    string       `json:"serviceId"`
+	AssignmentID string       `json:"assignmentId"`
+	AccountID    string       `json:"accountId"`
+	Workspace    Workspace    `json:"workspace"`
+	Resources    Resources    `json:"resources"`
+	Lease        CommandLease `json:"-"`
+}
+
+// CommandLease carries optional fields supplied by newer control planes.  The
+// current API does not require them, but retaining them prevents an agent from
+// acknowledging work with an unknown future lease.
+type CommandLease struct {
+	Token      string `json:"leaseToken,omitempty"`
+	Generation string `json:"leaseGeneration,omitempty"`
+	ExpiresAt  string `json:"leaseExpiresAt,omitempty"`
 }
 
 type SyncResult struct {
@@ -76,6 +86,12 @@ type Reporter interface {
 	Heartbeat(ctx context.Context, status NodeStatus) error
 	ReportStarted(ctx context.Context, serviceID, assignmentID string) error
 	ReportStoppedAndSynced(ctx context.Context, result SyncResult) error
+}
+
+// LeaseRenewer is intentionally separate from CommandSource so existing
+// sources remain compatible until the control plane enables lease renewal.
+type LeaseRenewer interface {
+	RenewLease(ctx context.Context, commandID string, lease CommandLease) (CommandLease, error)
 }
 
 var ErrTransportUnconfigured = errors.New("control-plane transport is not configured: install an authenticated mTLS transport adapter")

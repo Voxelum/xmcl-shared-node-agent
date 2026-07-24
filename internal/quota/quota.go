@@ -2,52 +2,81 @@ package quota
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 )
+
+const HelperPath = "/usr/local/libexec/xmcl-quota-helper"
 
 type Applier interface {
 	Validate(ctx context.Context) error
 	Apply(ctx context.Context, directory string, gib int64) error
 }
 
-type XFSProjectQuota struct {
-	MountPath   string
-	ProjectBase uint32
+// Helper delegates the privileged XFS mutation to a root-owned setuid helper.
+// The helper reads its mount and project configuration from a root-owned file;
+// the agent can supply only a workspace directory and a positive limit.
+type Helper struct {
+	Path          string
+	WorkspaceRoot string
+	run           func(context.Context, string, ...string) error
 }
 
-func (q XFSProjectQuota) Validate(ctx context.Context) error {
-	return q.run(ctx, "state")
+func NewHelper(workspaceRoot string) *Helper {
+	return &Helper{
+		Path:          HelperPath,
+		WorkspaceRoot: workspaceRoot,
+		run: func(ctx context.Context, path string, args ...string) error {
+			output, err := exec.CommandContext(ctx, path, args...).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("quota helper: %w: %s", err, output)
+			}
+			return nil
+		},
+	}
 }
 
-func (q XFSProjectQuota) Apply(ctx context.Context, directory string, gib int64) error {
+func (q *Helper) Validate(ctx context.Context) error {
+	if err := q.validateWorkspaceRoot(); err != nil {
+		return err
+	}
+	return q.run(ctx, q.Path, "check")
+}
+
+func (q *Helper) Apply(ctx context.Context, directory string, gib int64) error {
 	if gib < 1 {
-		return fmt.Errorf("workspace quota must be positive")
+		return errors.New("workspace quota must be positive")
 	}
-	projectID := q.projectID(directory)
-	if err := q.run(ctx, "project -s -p "+directory+" "+projectID); err != nil {
-		return fmt.Errorf("assign XFS project quota: %w", err)
+	if err := q.validateDirectory(directory); err != nil {
+		return err
 	}
-	if err := q.run(ctx, "limit -p bhard="+strconv.FormatInt(gib, 10)+"g "+projectID); err != nil {
-		return fmt.Errorf("set XFS project quota: %w", err)
+	return q.run(ctx, q.Path, "apply", "--directory", directory, "--gib", strconv.FormatInt(gib, 10))
+}
+
+func (q *Helper) validateWorkspaceRoot() error {
+	if q.Path != HelperPath {
+		return errors.New("quota helper path is fixed and cannot be overridden")
+	}
+	if !filepath.IsAbs(q.WorkspaceRoot) || strings.ContainsAny(q.WorkspaceRoot, " \t\n\r'\"") {
+		return errors.New("workspace root is not safe for quota helper")
 	}
 	return nil
 }
 
-func (q XFSProjectQuota) projectID(directory string) string {
-	var hash uint32 = 2166136261
-	for _, b := range []byte(directory) {
-		hash ^= uint32(b)
-		hash *= 16777619
+func (q *Helper) validateDirectory(directory string) error {
+	if err := q.validateWorkspaceRoot(); err != nil {
+		return err
 	}
-	return strconv.FormatUint(uint64(q.ProjectBase+(hash&0x3fffffff)), 10)
-}
-
-func (q XFSProjectQuota) run(ctx context.Context, command string) error {
-	output, err := exec.CommandContext(ctx, "xfs_quota", "-x", "-c", command, q.MountPath).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("xfs_quota: %w: %s", err, output)
+	relative, err := filepath.Rel(q.WorkspaceRoot, directory)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("quota directory must be a direct child of the workspace root")
+	}
+	if strings.Contains(relative, string(filepath.Separator)) || strings.ContainsAny(directory, " \t\n\r'\"") {
+		return errors.New("quota directory is not a safe service workspace")
 	}
 	return nil
 }

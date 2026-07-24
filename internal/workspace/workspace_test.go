@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,15 @@ func (s *memoryObjects) Download(_ context.Context, key string) ([]byte, error) 
 	return append([]byte(nil), data...), nil
 }
 
+func (s *memoryObjects) DownloadTo(ctx context.Context, key string, destination io.Writer) (int64, error) {
+	data, err := s.Download(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	count, err := destination.Write(data)
+	return int64(count), err
+}
+
 func (s *memoryObjects) Exists(_ context.Context, key string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -53,6 +63,17 @@ func (s *memoryObjects) Upload(_ context.Context, key string, data []byte, _ str
 	}
 	s.modified[key] = time.Now()
 	return nil
+}
+
+func (s *memoryObjects) UploadFile(ctx context.Context, key, path, contentType string) (int64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.Upload(ctx, key, data, contentType); err != nil {
+		return 0, err
+	}
+	return int64(len(data)), nil
 }
 
 func (s *memoryObjects) List(_ context.Context, prefix string) ([]objectstore.ObjectInfo, error) {
@@ -174,6 +195,7 @@ func TestRestoreRequiresManifestAndExpectedManifestHash(t *testing.T) {
 	if _, err := manager.Restore(context.Background(), command); err == nil {
 		t.Fatal("partial revision without a manifest must not restore")
 	}
+
 	manifest := Manifest{
 		SchemaVersion: 1, ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
 		Revision: command.Workspace.Revision, SizeBytes: int64(len(file)),
@@ -188,6 +210,24 @@ func TestRestoreRequiresManifestAndExpectedManifestHash(t *testing.T) {
 	command.Workspace.SHA256 = digest([]byte("wrong"))
 	if _, err := manager.Restore(context.Background(), command); err == nil {
 		t.Fatal("manifest hash mismatch must block restore")
+	}
+}
+
+func TestRestoreRevisionZeroCreatesEmptyWorkspace(t *testing.T) {
+	command := restoreCommand()
+	command.Workspace.Revision = 0
+	objects := &memoryObjects{objects: make(map[string][]byte)}
+	manager := New(t.TempDir(), objects, testQuota{})
+	path, err := manager.Restore(context.Background(), command)
+	if err != nil {
+		t.Fatalf("revision zero empty workspace was rejected: %v", err)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("new workspace should be empty, got %v", entries)
 	}
 }
 

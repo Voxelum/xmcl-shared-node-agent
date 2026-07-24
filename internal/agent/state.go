@@ -18,11 +18,14 @@ type StateStore interface {
 	Result(commandID string) (controlplane.CommandResult, bool, error)
 	Active(serviceID string) (ActiveAssignment, bool, error)
 	Commit(commandID, serviceID string, result controlplane.CommandResult, active *ActiveAssignment) error
+	SetLease(commandID string, lease controlplane.CommandLease) error
+	ClearLease(commandID string) error
 }
 
 type fileState struct {
 	Results map[string]controlplane.CommandResult `json:"results"`
 	Active  map[string]ActiveAssignment           `json:"active"`
+	Leases  map[string]controlplane.CommandLease  `json:"leases"`
 }
 
 type FileStore struct {
@@ -38,6 +41,7 @@ func NewFileStore(root string) (*FileStore, error) {
 	store := &FileStore{path: filepath.Join(root, "commands.json"), data: fileState{
 		Results: make(map[string]controlplane.CommandResult),
 		Active:  make(map[string]ActiveAssignment),
+		Leases:  make(map[string]controlplane.CommandLease),
 	}}
 	data, err := os.ReadFile(store.path)
 	if os.IsNotExist(err) {
@@ -54,6 +58,9 @@ func NewFileStore(root string) (*FileStore, error) {
 	}
 	if store.data.Active == nil {
 		store.data.Active = make(map[string]ActiveAssignment)
+	}
+	if store.data.Leases == nil {
+		store.data.Leases = make(map[string]controlplane.CommandLease)
 	}
 	return store, nil
 }
@@ -81,6 +88,24 @@ func (s *FileStore) Commit(commandID, serviceID string, result controlplane.Comm
 	} else {
 		s.data.Active[serviceID] = *active
 	}
+	return s.persist()
+}
+
+func (s *FileStore) SetLease(commandID string, lease controlplane.CommandLease) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.Leases[commandID] = lease
+	return s.persist()
+}
+
+func (s *FileStore) ClearLease(commandID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data.Leases, commandID)
+	return s.persist()
+}
+
+func (s *FileStore) persist() error {
 	data, err := json.Marshal(s.data)
 	if err != nil {
 		return fmt.Errorf("encode command state: %w", err)

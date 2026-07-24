@@ -2,9 +2,12 @@ package docker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,13 +15,16 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/go-connections/nat"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/agent"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
 )
 
 const cpuPeriod int64 = 100000
+const privateNetwork = "xmcl-shared-private"
 
 type Runtime struct {
 	client      *client.Client
@@ -41,6 +47,17 @@ func (r *Runtime) Validate(ctx context.Context) error {
 	}
 	if _, _, err := r.client.ImageInspectWithRaw(ctx, r.image); err != nil {
 		return fmt.Errorf("inspect configured container image: %w", err)
+	}
+	if _, err := r.client.NetworkInspect(ctx, privateNetwork, network.InspectOptions{}); err != nil {
+		if !errdefs.IsNotFound(err) {
+			return fmt.Errorf("inspect private container network: %w", err)
+		}
+		if _, err := r.client.NetworkCreate(ctx, privateNetwork, network.CreateOptions{
+			Driver:   "bridge",
+			Internal: true,
+		}); err != nil {
+			return fmt.Errorf("create private container network: %w", err)
+		}
 	}
 	return nil
 }
@@ -166,9 +183,14 @@ func BuildCreateRequest(command controlplane.Command, workspacePath, image strin
 	}
 	memory := command.Resources.MemoryMiB * 1024 * 1024
 	pids := int64(256)
+	gamePort := nat.Port("25565/tcp")
+	hostPort := deterministicHostPort(command.AssignmentID)
 	config := &container.Config{
 		Image: image,
 		User:  "1000:1000",
+		ExposedPorts: nat.PortSet{
+			gamePort: struct{}{},
+		},
 		Labels: map[string]string{
 			"xmcl.service-id":    command.ServiceID,
 			"xmcl.assignment-id": command.AssignmentID,
@@ -188,11 +210,21 @@ func BuildCreateRequest(command controlplane.Command, workspacePath, image strin
 		Privileged:     false,
 		SecurityOpt:    []string{"no-new-privileges:true"},
 		CapDrop:        []string{"ALL"},
+		NetworkMode:    container.NetworkMode(privateNetwork),
+		PortBindings: nat.PortMap{
+			gamePort: []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: strconv.Itoa(hostPort)}},
+		},
 		Mounts: []mount.Mount{{
 			Type: mount.TypeBind, Source: workspacePath, Target: "/data", ReadOnly: false,
 		}},
 	}
+
 	return config, hostConfig, nil
+}
+
+func deterministicHostPort(assignmentID string) int {
+	sum := sha256.Sum256([]byte(assignmentID))
+	return 25565 + int(binary.BigEndian.Uint16(sum[:2])%10000)
 }
 
 func (r *Runtime) waitHealthy(ctx context.Context, id string) error {

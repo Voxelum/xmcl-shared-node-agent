@@ -33,12 +33,13 @@ Create `/etc/xmcl-shared-node-agent.env` with mode `0600`, owned by
 XMCL_SHARED_NODE_ID
 XMCL_CONTROL_PLANE_URL
 XMCL_CONTROL_PLANE_CREDENTIAL
-XMCL_S3_ENDPOINT
-XMCL_S3_REGION
-XMCL_S3_BUCKET
-XMCL_S3_ACCESS_KEY
-XMCL_S3_SECRET_KEY
-XMCL_WORKSPACE_ROOT=/var/lib/xmcl-shared/workspaces
+XMCL_VULTR_OBJECT_STORAGE_ENDPOINT
+XMCL_VULTR_OBJECT_STORAGE_REGION
+XMCL_VULTR_OBJECT_STORAGE_BUCKET
+XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY
+XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY
+XMCL_WORKSPACE_ROOT
+XMCL_STATE_ROOT
 XMCL_CONTAINER_IMAGE
 XMCL_RCON_STOP_TIMEOUT_SECONDS=60
 XMCL_TOTAL_MEMORY_MIB
@@ -50,8 +51,12 @@ XMCL_METRICS_ADDR=127.0.0.1:9464
 ```
 
 `XMCL_QUOTA_MOUNT_PATH` must be an XFS filesystem mounted with project quotas.
-The agent validates `xfs_quota` at startup and fails closed when hard workspace
-quotas are unavailable.
+Provision the root-owned `/usr/local/libexec/xmcl-quota-helper` with mode
+`4750`, group `xmcl-agent`, and a root-owned mode-`0600`
+`/etc/xmcl-shared-node-agent/quota-helper.json` based on
+`deploy/systemd/quota-helper.json.example`. The agent can request a quota only
+for a direct workspace child; it fails closed when the helper or hard quota is
+unavailable.
 
 ## Workspace storage operations
 
@@ -63,13 +68,13 @@ network.
 
 ## Control-plane transport
 
-The API-side contract currently has no authenticated node-agent endpoint. The
-execution core exposes `controlplane.CommandSource` and
-`controlplane.Reporter`; tests use `MemoryGateway`. The binary intentionally
-refuses to start command processing with an unconfigured transport rather than
-inventing an unauthenticated HTTP API. A production adapter must provide mTLS,
-short-lived credentials, timestamp/nonce/body-hash replay protection, and
-strict node ownership checks.
+The binary uses an outbound HTTPS long-poll client. Bootstrap registration
+exchanges `XMCL_CONTROL_PLANE_CREDENTIAL` for an atomically persisted,
+mode-`0600` short-lived node credential. Every request has the required
+timestamp, nonce, body hash, and HMAC signature; no control-plane port is
+opened on a compute node. It sends a heartbeat immediately after registration
+and on a fixed cadence, retrying transient transport failures with bounded
+backoff.
 
 ## Install
 
