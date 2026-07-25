@@ -11,8 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
-	"strings"
 )
 
 var (
@@ -24,12 +22,22 @@ var (
 const maxDescriptorBytes int64 = 1 << 20
 
 type Descriptor struct {
-	SchemaVersion    int    `json:"schemaVersion"`
-	MinecraftVersion string `json:"minecraftVersion"`
-	JavaMajor        int    `json:"javaMajor"`
-	Loader           Loader `json:"loader"`
-	Launch           Launch `json:"launch"`
-	ContentSHA256    string `json:"contentSha256"`
+	SchemaVersion    int     `json:"schemaVersion"`
+	MinecraftVersion string  `json:"minecraftVersion"`
+	Java             Java    `json:"java"`
+	RuntimeCatalog   Catalog `json:"runtimeCatalog"`
+	Loader           Loader  `json:"loader"`
+	Launch           Launch  `json:"launch"`
+	ContentSHA256    string  `json:"contentSha256"`
+}
+
+type Java struct {
+	Component string `json:"component"`
+	Major     int    `json:"major"`
+}
+
+type Catalog struct {
+	SHA256 string `json:"sha256"`
 }
 
 type Loader struct {
@@ -43,13 +51,11 @@ type Launch struct {
 	Arguments []string `json:"arguments"`
 }
 
-func BundledJava(major int) (string, error) {
-	switch major {
-	case 8, 16, 17, 21:
-		return fmt.Sprintf("/opt/xmcl/jre/%d/bin/java", major), nil
-	default:
+func BundledJava(java Java) (string, error) {
+	if !catalogAllowsJava(java) {
 		return "", errors.New("runtime descriptor requests an unsupported Java major")
 	}
+	return fmt.Sprintf("/opt/xmcl/jre/%d/bin/java", java.Major), nil
 }
 
 // ValidateWorkspace rejects every dynamic launch field. expectedContentSHA is
@@ -103,22 +109,17 @@ func validate(value Descriptor, expectedContentSHA string) error {
 	if expectedContentSHA != "" && value.ContentSHA256 != expectedContentSHA {
 		return errors.New("runtime descriptor content hash does not match restored content")
 	}
-	if _, err := BundledJava(value.JavaMajor); err != nil {
+	if value.RuntimeCatalog.SHA256 != reviewedCatalog.SHA256 {
+		return errors.New("runtime descriptor catalog revision does not match the reviewed catalog")
+	}
+	if _, err := BundledJava(value.Java); err != nil {
 		return err
 	}
 	if !loaderPattern.MatchString(value.Loader.Version) {
 		return errors.New("runtime descriptor has an invalid loader version")
 	}
-	expectedJava, err := JavaForCompatibility(
-		value.MinecraftVersion,
-		value.Loader.Kind,
-		value.Loader.Version,
-	)
-	if err != nil {
-		return err
-	}
-	if value.JavaMajor != expectedJava {
-		return errors.New("runtime descriptor Java major is incompatible with the selected Minecraft and loader metadata")
+	if !validLoader(value.MinecraftVersion, value.Loader.Kind) {
+		return errors.New("runtime descriptor has unsupported loader compatibility")
 	}
 	if value.Launch.Kind != "generated-server-launcher" ||
 		value.Launch.Path != ".xmcl/launch.sh" || len(value.Launch.Arguments) != 0 {
@@ -127,43 +128,21 @@ func validate(value Descriptor, expectedContentSHA string) error {
 	return nil
 }
 
-// JavaForCompatibility mirrors the control-plane descriptor contract. It uses
-// the exact Minecraft release plus loader metadata rather than accepting an
-// arbitrary Java major from the content archive.
-func JavaForCompatibility(minecraftVersion, loaderKind, loaderVersion string) (int, error) {
+func validLoader(minecraftVersion, loaderKind string) bool {
 	match := minecraftPattern.FindStringSubmatch(minecraftVersion)
-	if match == nil || !loaderPattern.MatchString(loaderVersion) {
-		return 0, errors.New("runtime descriptor has unsupported compatibility metadata")
+	if match == nil {
+		return false
 	}
-	minor, err := strconv.Atoi(strings.Split(match[0], ".")[1])
-	if err != nil {
-		return 0, errors.New("runtime descriptor has unsupported Minecraft version")
+	var minor, patch int
+	if _, err := fmt.Sscanf(minecraftVersion, "1.%d.%d", &minor, &patch); err != nil {
+		return false
 	}
-	patch, err := strconv.Atoi(strings.Split(match[0], ".")[2])
-	if err != nil {
-		return 0, errors.New("runtime descriptor has unsupported Minecraft version")
-	}
-
 	switch loaderKind {
 	case "forge", "fabric", "quilt":
+		return true
 	case "neoforge":
-		// NeoForge starts at Minecraft 1.20.2. Rejecting an invented legacy
-		// mapping is safer than treating it as Forge.
-		if minor < 20 || (minor == 20 && patch < 2) {
-			return 0, errors.New("runtime descriptor has unsupported NeoForge compatibility")
-		}
+		return minor > 20 || (minor == 20 && patch >= 2)
 	default:
-		return 0, errors.New("runtime descriptor has an unsupported loader")
-	}
-
-	switch {
-	case minor <= 16:
-		return 8, nil
-	case minor == 17:
-		return 16, nil
-	case minor < 20 || (minor == 20 && patch <= 4):
-		return 17, nil
-	default:
-		return 21, nil
+		return false
 	}
 }

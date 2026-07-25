@@ -23,45 +23,44 @@ func writeDescriptor(t *testing.T, root, body string) {
 	}
 }
 
-func descriptor(minecraft string, java int, loader string) string {
-	return `{"schemaVersion":1,"minecraftVersion":"` + minecraft + `","javaMajor":` +
-		strconv.Itoa(java) +
-		`,"loader":{"kind":"` + loader + `","version":"1.0.0"},"launch":{"kind":"generated-server-launcher","path":".xmcl/launch.sh","arguments":[]},"contentSha256":"` + contentSHA + `"}`
+func descriptor(minecraft, component string, major int, loader string) string {
+	return `{"schemaVersion":1,"minecraftVersion":"` + minecraft + `","java":{"component":"` +
+		component + `","major":` + strconv.Itoa(major) + `},"runtimeCatalog":{"sha256":"` +
+		reviewedCatalog.SHA256 +
+		`"},"loader":{"kind":"` + loader + `","version":"1.0.0"},"launch":{"kind":"generated-server-launcher","path":".xmcl/launch.sh","arguments":[]},"contentSha256":"` + contentSHA + `"}`
 }
 
-func TestValidateWorkspaceSelectsOnlyBundledJREs(t *testing.T) {
-	for _, fixture := range []struct {
-		minecraft string
-		java      int
-		loader    string
-	}{
-		{minecraft: "1.12.2", java: 8, loader: "forge"},
-		{minecraft: "1.17.1", java: 16, loader: "forge"},
-		{minecraft: "1.20.4", java: 17, loader: "fabric"},
-		{minecraft: "1.21.1", java: 21, loader: "neoforge"},
-	} {
+func TestValidateWorkspaceSelectsEveryCatalogBundledJRE(t *testing.T) {
+	hasJava25 := false
+	for _, fixture := range reviewedCatalog.Requirements {
 		root := t.TempDir()
-		writeDescriptor(t, root, descriptor(fixture.minecraft, fixture.java, fixture.loader))
+		writeDescriptor(t, root, descriptor("1.21.1", fixture.Component, fixture.Major, "fabric"))
 		got, err := ValidateWorkspace(root, contentSHA)
-		if err != nil || got.JavaMajor != fixture.java {
-			t.Fatalf("Java %d validation failed: %#v %v", fixture.java, got, err)
+		if err != nil || got.Java.Major != fixture.Major {
+			t.Fatalf("Java %d validation failed: %#v %v", fixture.Major, got, err)
 		}
-		java, err := BundledJava(fixture.java)
-		if err != nil || !strings.Contains(java, "/"+strconv.Itoa(fixture.java)+"/") {
-			t.Fatalf("Java %d selection = %q, %v", fixture.java, java, err)
+		java, err := BundledJava(got.Java)
+		if err != nil || !strings.Contains(java, "/"+strconv.Itoa(fixture.Major)+"/") {
+			t.Fatalf("Java %d selection = %q, %v", fixture.Major, java, err)
 		}
+		hasJava25 = hasJava25 || fixture.Major == 25
+	}
+	if !hasJava25 {
+		t.Fatal("reviewed catalog no longer includes Java 25")
 	}
 }
 
 func TestValidateWorkspaceRejectsUntrustedDescriptorFields(t *testing.T) {
 	cases := []string{
-		strings.Replace(descriptor("1.21.1", 21, "fabric"), `.xmcl/launch.sh`, `../bin/sh`, 1),
-		strings.Replace(descriptor("1.21.1", 21, "fabric"), `"arguments":[]`, `"arguments":["-Duser=x"]`, 1),
-		strings.Replace(descriptor("1.21.1", 21, "fabric"), `"kind":"fabric"`, `"kind":"vanilla"`, 1),
-		strings.Replace(descriptor("1.21.1", 21, "fabric"), contentSHA, strings.Repeat("b", 64), 1),
-		strings.Replace(descriptor("1.21.1", 21, "fabric"), `"schemaVersion":1`, `"schemaVersion":2`, 1),
-		strings.Replace(descriptor("1.21.1", 21, "fabric"), `"javaMajor":21`, `"javaMajor":8`, 1),
-		descriptor("1.12.2", 8, "neoforge"),
+		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), `.xmcl/launch.sh`, `../bin/sh`, 1),
+		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), `"arguments":[]`, `"arguments":["-Duser=x"]`, 1),
+		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), `"kind":"fabric"`, `"kind":"vanilla"`, 1),
+		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), contentSHA, strings.Repeat("b", 64), 1),
+		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), `"schemaVersion":1`, `"schemaVersion":2`, 1),
+		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), `"major":21`, `"major":25`, 1),
+		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), "java-runtime-delta", "unreviewed-component", 1),
+		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), reviewedCatalog.SHA256, strings.Repeat("c", 64), 1),
+		descriptor("1.12.2", "jre-legacy", 8, "neoforge"),
 	}
 	for _, body := range cases {
 		root := t.TempDir()

@@ -48,7 +48,7 @@ func launch() error {
 	if err := os.WriteFile(filepath.Join(dataRoot, "eula.txt"), []byte("eula=true\n"), 0o640); err != nil {
 		return fmt.Errorf("record accepted EULA: %w", err)
 	}
-	java, err := runtimecontract.BundledJava(descriptor.JavaMajor)
+	java, err := runtimecontract.BundledJava(descriptor.Java)
 	if err != nil {
 		return err
 	}
