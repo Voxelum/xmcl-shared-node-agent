@@ -29,7 +29,7 @@ container, and syncs immutable revisions before acknowledging a stop.
   images, vanilla fallbacks, user commands, user environment variables, and
   user-selected Docker options are rejected.
 - Before creating a modded container the agent validates the compiler-owned
-  `.xmcl/runtime.json`, its selected content hash, Java 8/17/21 choice, loader,
+  `.xmcl/runtime.json`, its selected content hash, Java 8/16/17/21 choice, loader,
   and fixed generated launcher. It never downloads loader/server/mod artifacts.
 
 ## Configuration
@@ -59,7 +59,7 @@ XMCL_METRICS_ADDR=127.0.0.1:9464
 ```
 
 `XMCL_CONTAINER_IMAGE` is the generic multi-JRE image only. It contains the
-trusted Java 8, 17, and 21 assets and its health check probes local port 25565.
+trusted Java 8, 16, 17, and 21 assets and its health check probes local port 25565.
 The image writes `eula=true` only when the control plane sends the
 server-side policy-approved `eulaAccepted` command field; missing approval is a
 launch failure. See [`deploy/runtime/Dockerfile`](deploy/runtime/Dockerfile).

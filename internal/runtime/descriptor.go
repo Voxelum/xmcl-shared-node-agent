@@ -45,7 +45,7 @@ type Launch struct {
 
 func BundledJava(major int) (string, error) {
 	switch major {
-	case 8, 17, 21:
+	case 8, 16, 17, 21:
 		return fmt.Sprintf("/opt/xmcl/jre/%d/bin/java", major), nil
 	default:
 		return "", errors.New("runtime descriptor requests an unsupported Java major")
@@ -159,6 +159,8 @@ func JavaForCompatibility(minecraftVersion, loaderKind, loaderVersion string) (i
 	switch {
 	case minor <= 16:
 		return 8, nil
+	case minor == 17:
+		return 16, nil
 	case minor < 20 || (minor == 20 && patch <= 4):
 		return 17, nil
 	default:

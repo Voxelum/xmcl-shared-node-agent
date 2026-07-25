@@ -4,6 +4,7 @@
 FROM scratch
 COPY deploy/runtime/runtime-assets/busybox /bin/sh
 COPY deploy/runtime/runtime-assets/jre8 /opt/xmcl/jre/8
+COPY deploy/runtime/runtime-assets/jre16 /opt/xmcl/jre/16
 COPY deploy/runtime/runtime-assets/jre17 /opt/xmcl/jre/17
 COPY deploy/runtime/runtime-assets/jre21 /opt/xmcl/jre/21
 COPY deploy/runtime/runtime-assets/xmcl-shared-minecraft-runtime /usr/local/bin/xmcl-shared-minecraft-runtime

@@ -36,6 +36,7 @@ func TestValidateWorkspaceSelectsOnlyBundledJREs(t *testing.T) {
 		loader    string
 	}{
 		{minecraft: "1.12.2", java: 8, loader: "forge"},
+		{minecraft: "1.17.1", java: 16, loader: "forge"},
 		{minecraft: "1.20.4", java: 17, loader: "fabric"},
 		{minecraft: "1.21.1", java: 21, loader: "neoforge"},
 	} {

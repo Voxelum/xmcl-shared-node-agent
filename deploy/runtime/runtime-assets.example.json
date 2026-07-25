@@ -11,6 +11,10 @@
     "source": "trusted XMCL-approved Java 8 archive",
     "sha256": "REQUIRED_64_HEX_SHA256"
   },
+  "jre16": {
+    "source": "trusted XMCL-approved Java 16 archive",
+    "sha256": "REQUIRED_64_HEX_SHA256"
+  },
   "jre17": {
     "source": "trusted XMCL-approved Java 17 archive",
     "sha256": "REQUIRED_64_HEX_SHA256"
