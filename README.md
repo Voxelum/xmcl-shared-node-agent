@@ -62,9 +62,10 @@ XMCL_METRICS_ADDR=127.0.0.1:9464
 trusted Java 8, 16, 17, and 21 assets and its health check probes local port 25565.
 The image writes `eula=true` only when the control plane sends the
 server-side policy-approved `eulaAccepted` command field; missing approval is a
-launch failure. See [`deploy/runtime/Dockerfile`](deploy/runtime/Dockerfile).
+launch failure. The image supply chain is owned by
+[`Voxelum/xmcl-shared-minecraft-runtime`](https://github.com/Voxelum/xmcl-shared-minecraft-runtime).
 The release pipeline must materialize and hash-verify the JRE assets described
-by `deploy/runtime/runtime-assets.example.json` before building and publishing
+by that repository's `runtime-assets.lock.json` before building and publishing
 the digest.
 
 `XMCL_VULTR_OBJECT_STORAGE_ENDPOINT` must be the Vultr HTTPS origin and
