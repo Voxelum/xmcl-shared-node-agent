@@ -23,50 +23,71 @@ func writeDescriptor(t *testing.T, root, body string) {
 	}
 }
 
-func descriptor(minecraft, component string, major int, loader string) string {
+func descriptor(minecraft, component string, major int, loader, loaderVersion string) string {
 	return `{"schemaVersion":1,"minecraftVersion":"` + minecraft + `","java":{"component":"` +
 		component + `","major":` + strconv.Itoa(major) + `},"runtimeCatalog":{"sha256":"` +
 		reviewedCatalog.SHA256 +
-		`"},"loader":{"kind":"` + loader + `","version":"1.0.0"},"launch":{"kind":"generated-server-launcher","path":".xmcl/launch.sh","arguments":[]},"contentSha256":"` + contentSHA + `"}`
+		`"},"loader":{"kind":"` + loader + `","version":"` + loaderVersion + `"},"launch":{"kind":"generated-server-launcher","path":".xmcl/launch.sh","arguments":[]},"contentSha256":"` + contentSHA + `"}`
 }
 
-func TestValidateWorkspaceSelectsEveryCatalogBundledJRE(t *testing.T) {
+func TestValidateWorkspaceSelectsEveryReviewedToolchain(t *testing.T) {
 	hasJava25 := false
-	for _, fixture := range reviewedCatalog.Requirements {
+	for _, fixture := range reviewedCatalog.Toolchains {
 		root := t.TempDir()
-		writeDescriptor(t, root, descriptor("1.21.1", fixture.Component, fixture.Major, "fabric"))
+		writeDescriptor(t, root, descriptor(
+			fixture.MinecraftVersion,
+			fixture.Java.Component,
+			fixture.Java.Major,
+			fixture.Loader.Kind,
+			fixture.Loader.Version,
+		))
 		got, err := ValidateWorkspace(root, contentSHA)
-		if err != nil || got.Java.Major != fixture.Major {
-			t.Fatalf("Java %d validation failed: %#v %v", fixture.Major, got, err)
+		if err != nil || got.Java.Major != fixture.Java.Major {
+			t.Fatalf("Java %d validation failed: %#v %v", fixture.Java.Major, got, err)
 		}
 		java, err := BundledJava(got.Java)
-		if err != nil || !strings.Contains(java, "/"+strconv.Itoa(fixture.Major)+"/") {
-			t.Fatalf("Java %d selection = %q, %v", fixture.Major, java, err)
+		if err != nil || !strings.Contains(java, "/"+strconv.Itoa(fixture.Java.Major)+"/") {
+			t.Fatalf("Java %d selection = %q, %v", fixture.Java.Major, java, err)
 		}
-		hasJava25 = hasJava25 || fixture.Major == 25
+		hasJava25 = hasJava25 || fixture.MinecraftVersion == "26.2" && fixture.Java.Major == 25
 	}
 	if !hasJava25 {
-		t.Fatal("reviewed catalog no longer includes Java 25")
+		t.Fatal("reviewed catalog no longer includes 26.2 Java 25")
 	}
 }
 
 func TestValidateWorkspaceRejectsUntrustedDescriptorFields(t *testing.T) {
+	valid := descriptor("1.21.1", "java-runtime-delta", 21, "neoforge", "21.1.115")
 	cases := []string{
-		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), `.xmcl/launch.sh`, `../bin/sh`, 1),
-		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), `"arguments":[]`, `"arguments":["-Duser=x"]`, 1),
-		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), `"kind":"fabric"`, `"kind":"vanilla"`, 1),
-		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), contentSHA, strings.Repeat("b", 64), 1),
-		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), `"schemaVersion":1`, `"schemaVersion":2`, 1),
-		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), `"major":21`, `"major":25`, 1),
-		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), "java-runtime-delta", "unreviewed-component", 1),
-		strings.Replace(descriptor("1.21.1", "java-runtime-delta", 21, "fabric"), reviewedCatalog.SHA256, strings.Repeat("c", 64), 1),
-		descriptor("1.12.2", "jre-legacy", 8, "neoforge"),
+		strings.Replace(valid, `.xmcl/launch.sh`, `../bin/sh`, 1),
+		strings.Replace(valid, `"arguments":[]`, `"arguments":["-Duser=x"]`, 1),
+		strings.Replace(valid, `"kind":"neoforge"`, `"kind":"vanilla"`, 1),
+		strings.Replace(valid, contentSHA, strings.Repeat("b", 64), 1),
+		strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":2`, 1),
+		strings.Replace(valid, `"major":21`, `"major":25`, 1),
+		strings.Replace(valid, "java-runtime-delta", "unreviewed-component", 1),
+		strings.Replace(valid, reviewedCatalog.SHA256, strings.Repeat("c", 64), 1),
+		strings.Replace(valid, `"version":"21.1.115"`, `"version":"21.1.116"`, 1),
+		descriptor("1.12.2", "jre-legacy", 8, "neoforge", "21.1.115"),
 	}
 	for _, body := range cases {
 		root := t.TempDir()
 		writeDescriptor(t, root, body)
 		if _, err := ValidateWorkspace(root, contentSHA); err == nil {
 			t.Fatalf("unsafe descriptor was accepted: %s", body)
+		}
+	}
+}
+
+func TestValidateWorkspaceRejectsUnsafeMinecraftVersionIDs(t *testing.T) {
+	valid := descriptor("26.2", "java-runtime-epsilon", 25, "fabric", "0.19.3")
+	for _, minecraft := range []string{
+		" 26.2", "26.2 ", "26.02", "../26.2", "https://example.test/26.2", "26.2;cmd", "26.2\n", "26.3",
+	} {
+		root := t.TempDir()
+		writeDescriptor(t, root, strings.Replace(valid, `"minecraftVersion":"26.2"`, `"minecraftVersion":"`+minecraft+`"`, 1))
+		if _, err := ValidateWorkspace(root, contentSHA); err == nil {
+			t.Fatalf("unsafe Minecraft version was accepted: %q", minecraft)
 		}
 	}
 }

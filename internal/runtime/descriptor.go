@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	sha256Pattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	minecraftPattern = regexp.MustCompile(`^1\.[0-9]+\.[0-9]+$`)
-	loaderPattern    = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,127}$`)
+	sha256Pattern          = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	minecraftPattern       = regexp.MustCompile(`^(?:1\.(?:0|[1-9][0-9]{0,2})\.(?:0|[1-9][0-9]{0,2})|[1-9][0-9]{1,3}\.(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2}))?)$`)
+	legacyMinecraftPattern = regexp.MustCompile(`^1\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$`)
+	loaderPattern          = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,127}$`)
 )
 
 const maxDescriptorBytes int64 = 1 << 20
@@ -121,6 +122,9 @@ func validate(value Descriptor, expectedContentSHA string) error {
 	if !validLoader(value.MinecraftVersion, value.Loader.Kind) {
 		return errors.New("runtime descriptor has unsupported loader compatibility")
 	}
+	if !catalogAllowsToolchain(value.MinecraftVersion, value.Loader, value.Java) {
+		return errors.New("runtime descriptor has unsupported reviewed toolchain")
+	}
 	if value.Launch.Kind != "generated-server-launcher" ||
 		value.Launch.Path != ".xmcl/launch.sh" || len(value.Launch.Arguments) != 0 {
 		return errors.New("runtime descriptor has an untrusted launch request")
@@ -129,20 +133,27 @@ func validate(value Descriptor, expectedContentSHA string) error {
 }
 
 func validLoader(minecraftVersion, loaderKind string) bool {
-	match := minecraftPattern.FindStringSubmatch(minecraftVersion)
-	if match == nil {
-		return false
-	}
-	var minor, patch int
-	if _, err := fmt.Sscanf(minecraftVersion, "1.%d.%d", &minor, &patch); err != nil {
+	if !validMinecraftVersion(minecraftVersion) {
 		return false
 	}
 	switch loaderKind {
 	case "forge", "fabric", "quilt":
 		return true
 	case "neoforge":
+		match := legacyMinecraftPattern.FindStringSubmatch(minecraftVersion)
+		if match == nil {
+			return true
+		}
+		var minor, patch int
+		if _, err := fmt.Sscanf(minecraftVersion, "1.%d.%d", &minor, &patch); err != nil {
+			return false
+		}
 		return minor > 20 || (minor == 20 && patch >= 2)
 	default:
 		return false
 	}
+}
+
+func validMinecraftVersion(value string) bool {
+	return minecraftPattern.MatchString(value)
 }

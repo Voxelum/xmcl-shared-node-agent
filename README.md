@@ -30,8 +30,11 @@ container, and syncs immutable revisions before acknowledging a stop.
   user-selected Docker options are rejected.
 - Before creating a modded container the agent validates the compiler-owned
   `.xmcl/runtime.json`, its selected content hash, official Java component/major,
-  compiled reviewed runtime-catalog SHA-256, loader, and fixed generated
-  launcher. It never downloads loader/server/mod artifacts.
+  compiled reviewed runtime-catalog SHA-256, exact reviewed Minecraft/loader/Java
+  toolchain tuple, and fixed generated launcher. Canonical `26.2`/Java 25 is
+  supported only by its reviewed tuple; paths, URLs, commands, whitespace/control
+  characters, and unreviewed versions reject. It never downloads loader/server/mod
+  artifacts.
 
 ## Configuration
 
