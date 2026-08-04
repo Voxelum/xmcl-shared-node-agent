@@ -2,6 +2,8 @@ package workspace
 
 import (
 	"archive/tar"
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -19,6 +21,8 @@ type testQuota struct{}
 
 func (testQuota) Validate(context.Context) error             { return nil }
 func (testQuota) Apply(context.Context, string, int64) error { return nil }
+func (testQuota) Prepare(context.Context, string) error      { return nil }
+func (testQuota) Seal(context.Context, string) error         { return nil }
 
 type memoryTransfer struct {
 	objects  map[string][]byte
@@ -72,19 +76,35 @@ type memoryGrants struct {
 	lastManifest    controlplane.WorkspaceManifest
 	lastManifestSHA string
 	manifestSHAs    []string
+	restoreObjects  map[string]controlplane.WorkspaceGrant
 }
 
-func (g *memoryGrants) RestoreWorkspaceGrants(_ context.Context, _ controlplane.Command, _ string, _ []string) (controlplane.WorkspaceGrantResponse, error) {
-	return controlplane.WorkspaceGrantResponse{}, errors.New("restore not configured")
+func (g *memoryGrants) RestoreWorkspaceGrants(_ context.Context, _ controlplane.Command, _ string, keys []string) (controlplane.WorkspaceGrantResponse, error) {
+	var grants []controlplane.WorkspaceGrant
+	for _, key := range keys {
+		grant, ok := g.restoreObjects[key]
+		if !ok {
+			return controlplane.WorkspaceGrantResponse{}, errors.New("restore not configured")
+		}
+		grants = append(grants, grant)
+	}
+	return controlplane.WorkspaceGrantResponse{ContractVersion: controlplane.WorkspaceGrantContractVersion, Grants: grants}, nil
 }
 
-func (g *memoryGrants) SyncWorkspaceGrants(_ context.Context, _ controlplane.Command, manifest controlplane.WorkspaceManifest, manifestSHA string) (controlplane.WorkspaceGrantResponse, error) {
+func (g *memoryGrants) SyncWorkspaceGrants(_ context.Context, _ controlplane.Command, manifest controlplane.WorkspaceManifest, manifestSHA string, requested []string) (controlplane.WorkspaceGrantResponse, error) {
 	g.syncCalls++
 	previous := g.lastManifest
 	g.lastManifest, g.lastManifestSHA = manifest, manifestSHA
 	g.manifestSHAs = append(g.manifestSHAs, manifestSHA)
 	var grants []controlplane.WorkspaceGrant
+	requestedKeys := make(map[string]struct{}, len(requested))
+	for _, key := range requested {
+		requestedKeys[key] = struct{}{}
+	}
 	for _, descriptor := range manifestDescriptors(manifest) {
+		if _, requested := requestedKeys[descriptor.Key]; !requested {
+			continue
+		}
 		reused := false
 		if g.reuseContent && g.syncCalls > 1 && manifest.Content != nil && descriptor.Key == manifest.Content.Key {
 			reused = true
@@ -120,6 +140,13 @@ func putGrant(key string) controlplane.WorkspaceGrant {
 	}
 }
 
+func getGrant(key string) controlplane.WorkspaceGrant {
+	return controlplane.WorkspaceGrant{
+		Key: key, Method: "GET", URL: "https://sgp1.vultrobjects.com/bucket/" + key,
+		ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339),
+	}
+}
+
 func stopCommand() controlplane.Command {
 	return controlplane.Command{
 		CommandID: "command_1234567890", Kind: controlplane.StopAndSync, NodeID: "node_1",
@@ -140,6 +167,7 @@ func TestSyncClassifiesV2LayersAndPublishesManifestLast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for name, content := range map[string]string{
 		"world/region/r.0.0.mca": "world",
 		"config/settings.toml":   "config",
@@ -167,6 +195,59 @@ func TestSyncClassifiesV2LayersAndPublishesManifestLast(t *testing.T) {
 	}
 	if len(transfer.uploaded) != 4 || transfer.uploaded[len(transfer.uploaded)-1] != manifestKey(command.Workspace.ObjectPrefix, result.Revision) {
 		t.Fatalf("manifest must be uploaded last, got %v", transfer.uploaded)
+	}
+}
+
+func TestRestoreInitialWorldUsesOnlyTheSelectedSeed(t *testing.T) {
+	var compressed bytes.Buffer
+	writer := zip.NewWriter(&compressed)
+	for name, content := range map[string]string{
+		"world/level.dat": "selected-world",
+		"world.json":      `{"schemaVersion":1}`,
+	} {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	command := controlplane.Command{
+		CommandID: "initial_world_command", Kind: controlplane.RestoreAndStart,
+		NodeID: "node_1", ServiceID: "service_1", AccountID: "account_1", AssignmentID: "assignment_1",
+		Workspace: controlplane.Workspace{ObjectPrefix: "shared-hosting/account_1/service_1/", Revision: 0},
+		Resources: controlplane.Resources{WorkspaceGiB: 1},
+		InitialWorld: &controlplane.InitialWorld{
+			SeedID: "seed_1", SHA256: digest(compressed.Bytes()), SizeBytes: int64(compressed.Len()), WorldName: "Selected",
+		},
+	}
+	key, err := initialWorldKey(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := New(t.TempDir(), &memoryGrants{
+		restoreObjects: map[string]controlplane.WorkspaceGrant{key: getGrant(key)},
+	}, &memoryTransfer{objects: map[string][]byte{key: compressed.Bytes()}}, testQuota{})
+	path, err := manager.Path(command.ServiceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.restoreInitialWorld(context.Background(), command, path); err != nil {
+		t.Fatal(err)
+	}
+	world, err := os.ReadFile(filepath.Join(path, "world", "level.dat"))
+	if err != nil || string(world) != "selected-world" {
+		t.Fatalf("restored selected world = %q, %v", world, err)
+	}
+	if _, err := os.Stat(filepath.Join(path, "world.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("seed manifest was written into workspace: %v", err)
 	}
 }
 
@@ -275,6 +356,9 @@ func TestSyncRetryUsesTheSameRevisionAndPublishesOnlyOnce(t *testing.T) {
 	if _, err := manager.Sync(context.Background(), command); err == nil {
 		t.Fatal("interrupted manifest publication unexpectedly succeeded")
 	}
+	// A fresh manager simulates an agent restart after the control plane
+	// accepted the immutable draft but before its manifest publish completed.
+	manager = New(root, grants, transfer, testQuota{})
 	result, err := manager.Sync(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)

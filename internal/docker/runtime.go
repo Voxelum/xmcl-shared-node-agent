@@ -120,18 +120,22 @@ func (r *Runtime) Start(ctx context.Context, command controlplane.Command, works
 	}
 	inspect, err := r.client.ContainerInspect(ctx, name)
 	if err == nil {
-		if inspect.Config.Labels["xmcl.assignment-id"] != command.AssignmentID {
-			return errors.New("existing container belongs to a different assignment")
-		}
 		if inspect.State.Running {
+			if inspect.Config.Labels["xmcl.assignment-id"] != command.AssignmentID {
+				return errors.New("existing running container belongs to a different assignment")
+			}
 			return r.waitHealthy(ctx, name)
 		}
+		// A successful stop deliberately leaves the container for its workspace
+		// sync. Remove any inactive managed predecessor before a new assignment,
+		// including one with an older assignment label.
 		if err := r.client.ContainerRemove(ctx, name, container.RemoveOptions{Force: true}); err != nil {
-			return fmt.Errorf("remove stopped assigned container: %w", err)
+			return fmt.Errorf("remove inactive managed container: %w", err)
 		}
 	} else if !errdefs.IsNotFound(err) {
 		return fmt.Errorf("inspect existing container: %w", err)
 	}
+
 	config, hostConfig, err := BuildCreateRequest(command, workspacePath, r.image)
 	if err != nil {
 		return err
@@ -147,6 +151,31 @@ func (r *Runtime) Start(ctx context.Context, command controlplane.Command, works
 	if err := r.waitHealthy(ctx, created.ID); err != nil {
 		_ = r.client.ContainerRemove(context.Background(), created.ID, container.RemoveOptions{Force: true})
 		return err
+	}
+	return nil
+}
+
+// RemoveOrphan is called only after Executor has compared managed labels with
+// durable state. It refuses to remove a differently named/unmanaged container.
+func (r *Runtime) RemoveOrphan(ctx context.Context, service agent.RunningService) error {
+	name, err := containerName(service.ServiceID)
+	if err != nil {
+		return err
+	}
+	inspect, err := r.client.ContainerInspect(ctx, name)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect orphan container: %w", err)
+	}
+	if inspect.Config.Labels["xmcl.managed"] != "true" ||
+		inspect.Config.Labels["xmcl.service-id"] != service.ServiceID ||
+		inspect.Config.Labels["xmcl.assignment-id"] != service.AssignmentID {
+		return errors.New("orphan container ownership labels do not match")
+	}
+	if err := r.client.ContainerRemove(ctx, name, container.RemoveOptions{Force: true}); err != nil {
+		return fmt.Errorf("remove orphan managed container: %w", err)
 	}
 	return nil
 }
@@ -265,7 +294,11 @@ func BuildCreateRequest(command controlplane.Command, workspacePath, image strin
 			gamePort: []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: strconv.Itoa(command.Connection.HostPort)}},
 		},
 		Mounts: []mount.Mount{{
-			Type: mount.TypeBind, Source: workspacePath, Target: "/data", ReadOnly: false,
+			Type:        mount.TypeBind,
+			Source:      workspacePath,
+			Target:      "/data",
+			ReadOnly:    false,
+			BindOptions: &mount.BindOptions{NonRecursive: true},
 		}},
 	}
 

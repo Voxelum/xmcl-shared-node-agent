@@ -28,7 +28,8 @@ func TestBuildCreateRequestHardensContainer(t *testing.T) {
 		t.Fatalf("unexpected hardened container configuration: %#v %#v", config, host)
 	}
 	if host.Resources.MemorySwap != host.Resources.Memory || host.Resources.CPUQuota != 2*cpuPeriod || len(host.Mounts) != 1 ||
-		host.Mounts[0].Target != "/data" || host.Mounts[0].Source == "/var/run/docker.sock" {
+		host.Mounts[0].Target != "/data" || host.Mounts[0].Source == "/var/run/docker.sock" ||
+		host.Mounts[0].BindOptions == nil || !host.Mounts[0].BindOptions.NonRecursive {
 		t.Fatalf("unexpected resource or mount configuration: %#v", host)
 	}
 	if len(host.SecurityOpt) != 1 || host.SecurityOpt[0] != "no-new-privileges:true" || host.Resources.PidsLimit == nil {

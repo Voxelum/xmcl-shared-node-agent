@@ -12,11 +12,15 @@ import (
 
 type ActiveAssignment struct {
 	AssignmentID string `json:"assignmentId"`
+	// Phase is persisted before Docker starts so a process crash during the
+	// health wait can be resumed rather than treated as an unowned container.
+	Phase string `json:"phase,omitempty"`
 }
 
 type StateStore interface {
 	Result(commandID string) (controlplane.CommandResult, bool, error)
 	Active(serviceID string) (ActiveAssignment, bool, error)
+	SetActive(serviceID string, active ActiveAssignment) error
 	Commit(commandID, serviceID string, result controlplane.CommandResult, active *ActiveAssignment) error
 	SetLease(commandID string, lease controlplane.CommandLease) error
 	ClearLease(commandID string) error
@@ -77,6 +81,13 @@ func (s *FileStore) Active(serviceID string) (ActiveAssignment, bool, error) {
 	defer s.mu.Unlock()
 	assignment, ok := s.data.Active[serviceID]
 	return assignment, ok, nil
+}
+
+func (s *FileStore) SetActive(serviceID string, active ActiveAssignment) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.Active[serviceID] = active
+	return s.persist()
 }
 
 func (s *FileStore) Commit(commandID, serviceID string, result controlplane.CommandResult, active *ActiveAssignment) error {

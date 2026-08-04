@@ -9,6 +9,7 @@ import (
 )
 
 type Workspace interface {
+	Path(serviceID string) (string, error)
 	Restore(ctx context.Context, command controlplane.Command) (string, error)
 	Sync(ctx context.Context, command controlplane.Command) (controlplane.SyncResult, error)
 	Release(ctx context.Context, command controlplane.Command) error
@@ -29,6 +30,28 @@ func (e *Executor) Release(ctx context.Context, command controlplane.Command) er
 type ContainerRuntime interface {
 	Start(ctx context.Context, command controlplane.Command, workspacePath string) error
 	Stop(ctx context.Context, command controlplane.Command) error
+}
+
+// OrphanReconciler removes only a managed container whose labels were already
+// checked by Executor. It is used to recover safely after an agent crash
+// before durable start state was written by an older binary.
+type OrphanReconciler interface {
+	RemoveOrphan(ctx context.Context, service RunningService) error
+}
+
+// RetryableError means the command must remain unacknowledged so its
+// lease-based delivery can resume. It is used for object transfer and Docker
+// operations, which are not valid terminal command outcomes.
+type RetryableError struct{ err error }
+
+func (e *RetryableError) Error() string { return e.err.Error() }
+func (e *RetryableError) Unwrap() error { return e.err }
+
+func retryable(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &RetryableError{err: err}
 }
 
 type RunningService struct {
@@ -78,7 +101,10 @@ func (e *Executor) Execute(ctx context.Context, command controlplane.Command) (c
 	} else if ok {
 		return result, nil
 	}
-	result, active := e.execute(ctx, command)
+	result, active, executeErr := e.execute(ctx, command)
+	if executeErr != nil {
+		return controlplane.CommandResult{}, executeErr
+	}
 	if err := e.store.Commit(command.CommandID, command.ServiceID, result, active); err != nil {
 		return controlplane.CommandResult{}, err
 	}
@@ -113,53 +139,80 @@ func (e *Executor) Reconcile(ctx context.Context) error {
 			return fmt.Errorf("read active assignment during reconciliation: %w", err)
 		}
 		if !exists || active.AssignmentID != service.AssignmentID {
-			return fmt.Errorf("locally running service %q has no matching durable assignment", service.ServiceID)
+			reconciler, ok := e.runtime.(OrphanReconciler)
+			if !ok {
+				return fmt.Errorf("locally running service %q has no matching durable assignment", service.ServiceID)
+			}
+			if err := reconciler.RemoveOrphan(ctx, service); err != nil {
+				return fmt.Errorf("remove unowned local service %q: %w", service.ServiceID, err)
+			}
+			continue
+		}
+		if active.Phase == "starting" {
+			active.Phase = "running"
+			if err := e.store.SetActive(service.ServiceID, active); err != nil {
+				return fmt.Errorf("persist recovered running service %q: %w", service.ServiceID, err)
+			}
 		}
 	}
 	return nil
 }
 
-func (e *Executor) execute(ctx context.Context, command controlplane.Command) (controlplane.CommandResult, *ActiveAssignment) {
+func (e *Executor) execute(ctx context.Context, command controlplane.Command) (controlplane.CommandResult, *ActiveAssignment, error) {
 	if command.CommandID == "" || command.ServiceID == "" || command.AssignmentID == "" {
-		return failed("command ID, service ID, and assignment ID are required"), e.currentActive(command.ServiceID)
+		return failed("command ID, service ID, and assignment ID are required"), e.currentActive(command.ServiceID), nil
 	}
 	if command.NodeID != e.nodeID {
-		return failed("command is assigned to a different node"), e.currentActive(command.ServiceID)
+		return failed("command is assigned to a different node"), e.currentActive(command.ServiceID), nil
 	}
 	active, exists, err := e.store.Active(command.ServiceID)
 	if err != nil {
-		return failed(fmt.Sprintf("read active assignment: %v", err)), nil
+		return controlplane.CommandResult{}, nil, err
 	}
 	switch command.Kind {
 	case controlplane.RestoreAndStart:
 		if command.Connection == nil || !command.Connection.Valid() {
-			return failed("restore command requires a control-plane assigned public connection"), activePointer(active, exists)
+			return failed("restore command requires a control-plane assigned public connection"), activePointer(active, exists), nil
 		}
 		if exists && active.AssignmentID != command.AssignmentID {
-			return failed("a different assignment is already active for this service"), &active
+			return failed("a different assignment is already active for this service"), &active, nil
 		}
-		path, err := e.workspace.Restore(ctx, command)
+		if exists && active.Phase == "running" {
+			return controlplane.CommandResult{Status: "started"}, &active, nil
+		}
+		var path string
+		if exists && active.Phase == "starting" {
+			path, err = e.workspace.Path(command.ServiceID)
+		} else {
+			path, err = e.workspace.Restore(ctx, command)
+		}
 		if err != nil {
-			return failed(fmt.Sprintf("restore workspace: %v", err)), activePointer(active, exists)
+			return controlplane.CommandResult{}, activePointer(active, exists), retryable(fmt.Errorf("restore workspace: %w", err))
+		}
+		starting := ActiveAssignment{AssignmentID: command.AssignmentID, Phase: "starting"}
+		if !exists || active.Phase != "starting" {
+			if err := e.store.SetActive(command.ServiceID, starting); err != nil {
+				return controlplane.CommandResult{}, nil, err
+			}
 		}
 		if err := e.runtime.Start(ctx, command, path); err != nil {
-			return failed(fmt.Sprintf("start container: %v", err)), activePointer(active, exists)
+			return controlplane.CommandResult{}, &starting, retryable(fmt.Errorf("start container: %w", err))
 		}
-		return controlplane.CommandResult{Status: "started"}, &ActiveAssignment{AssignmentID: command.AssignmentID}
+		return controlplane.CommandResult{Status: "started"}, &ActiveAssignment{AssignmentID: command.AssignmentID, Phase: "running"}, nil
 	case controlplane.StopAndSync:
 		if !exists || active.AssignmentID != command.AssignmentID {
-			return failed("stop command does not match an active assignment"), activePointer(active, exists)
+			return failed("stop command does not match an active assignment"), activePointer(active, exists), nil
 		}
 		if err := e.runtime.Stop(ctx, command); err != nil {
-			return failed(fmt.Sprintf("stop container: %v", err)), &active
+			return controlplane.CommandResult{}, &active, retryable(fmt.Errorf("stop container: %w", err))
 		}
 		syncResult, err := e.workspace.Sync(ctx, command)
 		if err != nil {
-			return failed(fmt.Sprintf("sync workspace: %v", err)), &active
+			return controlplane.CommandResult{}, &active, retryable(fmt.Errorf("sync workspace: %w", err))
 		}
-		return controlplane.CommandResult{Status: "stopped-and-synced", Sync: &syncResult}, nil
+		return controlplane.CommandResult{Status: "stopped-and-synced", Sync: &syncResult}, nil, nil
 	default:
-		return failed("unsupported command kind"), activePointer(active, exists)
+		return failed("unsupported command kind"), activePointer(active, exists), nil
 	}
 }
 

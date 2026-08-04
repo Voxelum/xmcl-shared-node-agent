@@ -74,7 +74,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/v1/internal/shared-nodes/register":
-			_, _ = w.Write([]byte(`{"nodeId":"node-1","credential":"node-1.initial-secret"}`))
+			_, _ = w.Write([]byte(`{"nodeId":"node-1","credential":"node-1.initial-secret","expiresAt":"2026-01-01T00:00:00Z"}`))
 		case "/v1/internal/shared-nodes/node-1/heartbeat":
 			if string(body) != `{"contractVersion":1,"status":"ready","capacity":{"freeWorkspaceGiB":8,"allocatableMemoryMiB":1536,"allocatableSharedCpu":1,"activeContainerCount":1},"agentVersion":"test-agent","ingress":{"host":"public-node.example"}}` {
 				t.Fatalf("heartbeat body = %s", body)
@@ -174,7 +174,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(persisted) != credential+"\n" {
+	if string(persisted) != `{"credential":"node-1.initial-secret","expiresAt":"2026-01-01T00:00:00Z"}`+"\n" {
 		t.Fatalf("persisted credential = %q", persisted)
 	}
 	if runtime.GOOS != "windows" {
@@ -208,6 +208,54 @@ func TestNewClientLoadsPersistedCredential(t *testing.T) {
 	defer client.mu.RUnlock()
 	if client.credential != "node-1.secret" {
 		t.Fatalf("credential = %q", client.credential)
+	}
+}
+
+func TestClientRotatesPersistedCredentialBeforeExpiry(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/internal/shared-nodes/register":
+			_, _ = w.Write([]byte(`{"nodeId":"node-1","credential":"node-1.first","expiresAt":"2026-01-01T00:10:00Z"}`))
+		case "/v1/internal/shared-nodes/node-1/credentials:rotate":
+			if r.Header.Get("Authorization") != "SharedNode node-1.first" {
+				t.Fatalf("rotation authorization = %q", r.Header.Get("Authorization"))
+			}
+			_, _ = w.Write([]byte(`{"nodeId":"node-1","credential":"node-1.second","expiresAt":"2026-01-01T00:30:00Z"}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "credential")
+	client, err := NewClient(ClientOptions{
+		BaseURL: server.URL, NodeID: "node-1", Region: "sgp",
+		BootstrapCredential: "bootstrap", CredentialPath: path, HTTPClient: server.Client(),
+		Now: func() time.Time { return now }, Nonce: func() (string, error) { return "nonce", nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Register(t.Context(), NodeCapacity{TotalMemoryMiB: 1, TotalSharedCPU: 1, TotalWorkspaceGiB: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(9 * time.Minute)
+	if !client.CredentialNeedsRotation() {
+		t.Fatal("credential near expiry did not require rotation")
+	}
+	if err := client.RotateCredential(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if client.CredentialNeedsRotation() {
+		t.Fatal("rotated credential still requires rotation")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), `"credential":"node-1.second"`) ||
+		!strings.Contains(string(data), `"expiresAt":"2026-01-01T00:30:00Z"`) {
+		t.Fatalf("persisted rotated credential = %q, %v", data, err)
 	}
 }
 

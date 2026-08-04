@@ -15,6 +15,8 @@ const HelperPath = "/usr/local/libexec/xmcl-quota-helper"
 type Applier interface {
 	Validate(ctx context.Context) error
 	Apply(ctx context.Context, directory string, gib int64) error
+	Prepare(ctx context.Context, directory string) error
+	Seal(ctx context.Context, directory string) error
 }
 
 // Helper delegates the privileged XFS mutation to a root-owned setuid helper.
@@ -55,6 +57,25 @@ func (q *Helper) Apply(ctx context.Context, directory string, gib int64) error {
 		return err
 	}
 	return q.run(ctx, q.Path, "apply", "--directory", directory, "--gib", strconv.FormatInt(gib, 10))
+}
+
+// Prepare grants UID/GID 1000 access only to its direct bind-mounted
+// workspace. The root-owned helper performs the ownership transition without
+// giving the node agent broad storage privileges.
+func (q *Helper) Prepare(ctx context.Context, directory string) error {
+	if err := q.validateDirectory(directory); err != nil {
+		return err
+	}
+	return q.run(ctx, q.Path, "prepare", "--directory", directory)
+}
+
+// Seal takes ownership back after Docker is stopped so untrusted runtime file
+// modes cannot prevent the agent from archiving the active workspace.
+func (q *Helper) Seal(ctx context.Context, directory string) error {
+	if err := q.validateDirectory(directory); err != nil {
+		return err
+	}
+	return q.run(ctx, q.Path, "seal", "--directory", directory)
 }
 
 func (q *Helper) validateWorkspaceRoot() error {

@@ -30,8 +30,17 @@ type credentialManager interface {
 	InvalidateCredential() error
 }
 
+type credentialRotator interface {
+	CredentialNeedsRotation() bool
+	RotateCredential(context.Context) error
+}
+
 func (d *Daemon) Register(ctx context.Context) error {
 	if credentials := d.credentials(); credentials != nil && credentials.HasCredential() {
+		if rotator, ok := credentials.(credentialRotator); ok &&
+			rotator.CredentialNeedsRotation() {
+			return d.retry(ctx, func() error { return rotator.RotateCredential(ctx) })
+		}
 		return nil
 	}
 	return retry(ctx, func() error { return d.Reporter.Register(ctx, d.Capacity) })
@@ -51,6 +60,9 @@ func (d *Daemon) Process(ctx context.Context, command controlplane.Command) erro
 
 	result, err := d.Executor.Execute(executionContext, command)
 	if err != nil {
+		if leaseLost.Load() {
+			return ErrLeaseLost
+		}
 		return err
 	}
 	if leaseLost.Load() {
@@ -110,15 +122,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 	heartbeatContext, stopHeartbeats := context.WithCancel(ctx)
 	defer stopHeartbeats()
 	go d.heartbeatLoop(heartbeatContext)
+	go d.credentialLoop(heartbeatContext)
 	for {
 		command, err := d.Source.Next(ctx, d.NodeID)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+
 			recovered, recoveryErr := d.recoverAuthentication(ctx, err)
 			if recoveryErr != nil {
-				return fmt.Errorf("re-enroll node after authentication failure: %w", recoveryErr)
+				return fmt.Errorf("recover node authentication failure: %w", recoveryErr)
 			}
 			if recovered {
 				continue
@@ -132,6 +146,25 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+		}
+	}
+}
+
+// credentialLoop renews credentials while they are still authenticated. It
+// intentionally has no bootstrap fallback: enrollment tokens are one-time
+// provisioning secrets, not a long-lived recovery credential.
+func (d *Daemon) credentialLoop(ctx context.Context) {
+	credentials := d.credentials()
+	rotator, ok := credentials.(credentialRotator)
+	if !ok {
+		return
+	}
+	for {
+		if rotator.CredentialNeedsRotation() {
+			_ = d.retry(ctx, func() error { return rotator.RotateCredential(ctx) })
+		}
+		if err := wait(ctx, 30*time.Second); err != nil {
+			return
 		}
 	}
 }
@@ -244,10 +277,11 @@ func (d *Daemon) recoverAuthentication(ctx context.Context, err error) (bool, er
 	if credentials == nil || !credentials.IsAuthenticationFailure(err) {
 		return false, nil
 	}
-	if err := credentials.InvalidateCredential(); err != nil {
-		return true, err
-	}
-	return true, retry(ctx, func() error { return d.Reporter.Register(ctx, d.Capacity) })
+	// A bootstrap credential is consumed at first enrollment. Retrying it
+	// after a normal credential expiry/rejection would both violate its
+	// one-time contract and loop forever. Keep the persisted credential for
+	// incident recovery and surface the authenticated-control-plane failure.
+	return true, fmt.Errorf("node credential was rejected; refusing bootstrap re-enrollment: %w", err)
 }
 
 func (d *Daemon) credentials() credentialManager {

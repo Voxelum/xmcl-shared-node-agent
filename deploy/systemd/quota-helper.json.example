@@ -1,5 +1,6 @@
 {
   "workspaceRoot": "/var/lib/xmcl-shared/workspaces",
   "mountPath": "/var/lib/xmcl-shared",
-  "projectBase": 1000
+  "projectBase": 1000,
+  "agentUser": "xmcl-agent"
 }

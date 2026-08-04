@@ -59,12 +59,22 @@ type Command struct {
 	// the control plane. It is never an image, command, environment, URL, or
 	// storage credential supplied by a customer.
 	RuntimeContent *WorkspaceBlob `json:"runtimeContent,omitempty"`
+	// InitialWorld is an immutable, account-selected world seed. It is valid
+	// only for revision zero and is obtained through one exact GET grant.
+	InitialWorld *InitialWorld `json:"initialWorld,omitempty"`
 	// EULAAccepted is set only by a server-side terms policy adapter. The agent
 	// never derives it from customer content or an environment variable.
 	EULAAccepted bool         `json:"eulaAccepted,omitempty"`
 	Resources    Resources    `json:"resources"`
 	Connection   *Connection  `json:"connection,omitempty"`
 	Lease        CommandLease `json:"-"`
+}
+
+type InitialWorld struct {
+	SeedID    string `json:"seedId"`
+	SHA256    string `json:"sha256"`
+	SizeBytes int64  `json:"sizeBytes"`
+	WorldName string `json:"worldName"`
 }
 
 // CommandLease carries optional fields supplied by newer control planes.  The
@@ -126,7 +136,9 @@ type WorkspaceGrantResponse struct {
 // command lease. It intentionally has no list, delete, or credential methods.
 type WorkspaceGrantClient interface {
 	RestoreWorkspaceGrants(context.Context, Command, string, []string) (WorkspaceGrantResponse, error)
-	SyncWorkspaceGrants(context.Context, Command, WorkspaceManifest, string) (WorkspaceGrantResponse, error)
+	// SyncWorkspaceGrants prepares or resumes one immutable draft and returns
+	// grants only for the requested bounded subset of manifest objects.
+	SyncWorkspaceGrants(context.Context, Command, WorkspaceManifest, string, []string) (WorkspaceGrantResponse, error)
 	PublishWorkspaceGrant(context.Context, Command, WorkspaceManifest, string) (WorkspaceGrantResponse, error)
 }
 

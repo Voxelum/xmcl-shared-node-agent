@@ -37,6 +37,7 @@ type Client struct {
 
 	mu         sync.RWMutex
 	credential string
+	expiresAt  string
 }
 
 type ClientOptions struct {
@@ -101,10 +102,11 @@ func NewClient(options ClientOptions) (*Client, error) {
 	if client.pollInterval <= 0 {
 		client.pollInterval = time.Second
 	}
-	if credential, err := client.readCredential(); err != nil {
+	if credential, expiresAt, err := client.readCredential(); err != nil {
 		return nil, err
 	} else {
 		client.credential = credential
+		client.expiresAt = expiresAt
 	}
 	if client.credential == "" && client.bootstrapCredential == "" {
 		return nil, errors.New("control-plane bootstrap credential is required without a persisted node credential")
@@ -112,8 +114,9 @@ func NewClient(options ClientOptions) (*Client, error) {
 	return client, nil
 }
 
-// Register uses the bootstrap credential and atomically replaces any previous
-// node credential with the short-lived credential issued by the control plane.
+// Register consumes the one-time bootstrap credential and atomically persists
+// the short-lived node credential returned by the control plane. Bootstrap is
+// intentionally never used to refresh an already enrolled node.
 func (c *Client) Register(ctx context.Context, capacity NodeCapacity) error {
 	if c.bootstrapCredential == "" {
 		return errors.New("control-plane bootstrap credential is unavailable")
@@ -138,6 +141,7 @@ func (c *Client) Register(ctx context.Context, capacity NodeCapacity) error {
 	var registered struct {
 		NodeID     string `json:"nodeId"`
 		Credential string `json:"credential"`
+		ExpiresAt  string `json:"expiresAt"`
 	}
 	if err := json.Unmarshal(response, &registered); err != nil {
 		return fmt.Errorf("decode registration response: %w", err)
@@ -145,7 +149,47 @@ func (c *Client) Register(ctx context.Context, capacity NodeCapacity) error {
 	if registered.NodeID != c.nodeID {
 		return errors.New("registration response has a different node ID")
 	}
-	return c.setCredential(registered.Credential)
+	return c.setCredential(registered.Credential, registered.ExpiresAt)
+}
+
+// CredentialNeedsRotation reports whether the credential is close enough to
+// expiry that the daemon must rotate it before continuing normal work. A
+// legacy credential without persisted expiry is deliberately rotated rather
+// than re-enrolled with bootstrap.
+func (c *Client) CredentialNeedsRotation() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.credential == "" {
+		return false
+	}
+	expiresAt, err := time.Parse(time.RFC3339, c.expiresAt)
+	return err != nil || !expiresAt.After(c.now().Add(2*time.Minute))
+}
+
+// RotateCredential exchanges a still-authenticated node credential for a new
+// short-lived credential. It must be called before expiry; it never falls back
+// to the consumed bootstrap credential.
+func (c *Client) RotateCredential(ctx context.Context) error {
+	response, err := c.sendNode(
+		ctx,
+		"/v1/internal/shared-nodes/"+c.nodeID+"/credentials:rotate",
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	var rotated struct {
+		NodeID     string `json:"nodeId"`
+		Credential string `json:"credential"`
+		ExpiresAt  string `json:"expiresAt"`
+	}
+	if err := json.Unmarshal(response, &rotated); err != nil {
+		return fmt.Errorf("decode credential rotation response: %w", err)
+	}
+	if rotated.NodeID != c.nodeID {
+		return errors.New("credential rotation response has a different node ID")
+	}
+	return c.setCredential(rotated.Credential, rotated.ExpiresAt)
 }
 
 func (c *Client) Heartbeat(ctx context.Context, status NodeStatus) error {
@@ -324,6 +368,7 @@ func (c *Client) InvalidateCredential() error {
 		return fmt.Errorf("remove rejected control-plane credential: %w", err)
 	}
 	c.credential = ""
+	c.expiresAt = ""
 	return nil
 }
 
@@ -331,8 +376,8 @@ func (c *Client) RestoreWorkspaceGrants(ctx context.Context, command Command, st
 	return c.workspaceGrants(ctx, "restore", command, stage, keys, nil, "")
 }
 
-func (c *Client) SyncWorkspaceGrants(ctx context.Context, command Command, manifest WorkspaceManifest, manifestSHA256 string) (WorkspaceGrantResponse, error) {
-	return c.workspaceGrants(ctx, "sync", command, "", nil, &manifest, manifestSHA256)
+func (c *Client) SyncWorkspaceGrants(ctx context.Context, command Command, manifest WorkspaceManifest, manifestSHA256 string, keys []string) (WorkspaceGrantResponse, error) {
+	return c.workspaceGrants(ctx, "sync", command, "", keys, &manifest, manifestSHA256)
 }
 
 func (c *Client) PublishWorkspaceGrant(ctx context.Context, command Command, manifest WorkspaceManifest, manifestSHA256 string) (WorkspaceGrantResponse, error) {
@@ -434,24 +479,53 @@ func (c *Client) send(ctx context.Context, path string, body []byte, scheme, cre
 	return responseBody, nil
 }
 
-func (c *Client) readCredential() (string, error) {
-	credential, err := os.ReadFile(c.credentialPath)
+func (c *Client) readCredential() (string, string, error) {
+	data, err := os.ReadFile(c.credentialPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
+		return "", "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("read control-plane credential: %w", err)
+		return "", "", fmt.Errorf("read control-plane credential: %w", err)
 	}
-	credential = []byte(strings.TrimSpace(string(credential)))
-	if err := validateCredential(c.nodeID, string(credential)); err != nil {
-		return "", err
+	var persisted struct {
+		Credential string `json:"credential"`
+		ExpiresAt  string `json:"expiresAt"`
 	}
-	return string(credential), nil
+	if json.Unmarshal(data, &persisted) == nil && persisted.Credential != "" {
+		if err := validateCredential(c.nodeID, persisted.Credential); err != nil {
+			return "", "", err
+		}
+		if _, err := time.Parse(time.RFC3339, persisted.ExpiresAt); err != nil {
+			return "", "", errors.New("control-plane credential expiry is invalid")
+		}
+		return persisted.Credential, persisted.ExpiresAt, nil
+	}
+	// Upgrade legacy files by retaining the credential only long enough to
+	// perform an authenticated rotation. Missing expiry never enables bootstrap.
+	credential := strings.TrimSpace(string(data))
+	if err := validateCredential(c.nodeID, credential); err != nil {
+		return "", "", err
+	}
+	return credential, "", nil
 }
 
-func (c *Client) setCredential(credential string) error {
+func (c *Client) setCredential(credential string, expiresAt ...string) error {
 	if err := validateCredential(c.nodeID, credential); err != nil {
 		return err
+	}
+	expiry := ""
+	if len(expiresAt) > 0 {
+		expiry = expiresAt[0]
+		if parsed, err := time.Parse(time.RFC3339, expiry); err != nil || !parsed.After(c.now()) {
+			return errors.New("control-plane credential expiry is invalid")
+		}
+	}
+	persisted, err := json.Marshal(struct {
+		Credential string `json:"credential"`
+		ExpiresAt  string `json:"expiresAt"`
+	}{Credential: credential, ExpiresAt: expiry})
+	if err != nil {
+		return fmt.Errorf("encode control-plane credential: %w", err)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -463,7 +537,7 @@ func (c *Client) setCredential(credential string) error {
 	if err != nil {
 		return fmt.Errorf("create control-plane credential: %w", err)
 	}
-	if _, err := file.WriteString(credential + "\n"); err == nil {
+	if _, err := file.Write(append(persisted, '\n')); err == nil {
 		err = file.Chmod(0o600)
 	}
 	if closeErr := file.Close(); err == nil {
@@ -478,6 +552,7 @@ func (c *Client) setCredential(credential string) error {
 		return fmt.Errorf("persist control-plane credential: %w", err)
 	}
 	c.credential = credential
+	c.expiresAt = expiry
 	return nil
 }
 

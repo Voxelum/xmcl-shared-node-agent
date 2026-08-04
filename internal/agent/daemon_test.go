@@ -220,7 +220,7 @@ func (g *rejectedCredentialGateway) Heartbeat(ctx context.Context, status contro
 	return g.daemonGateway.Heartbeat(ctx, status)
 }
 
-func TestDaemonReenrollsOnlyAfterExplicitAuthenticationFailure(t *testing.T) {
+func TestDaemonNeverReusesBootstrapAfterCredentialRejection(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -232,19 +232,11 @@ func TestDaemonReenrollsOnlyAfterExplicitAuthenticationFailure(t *testing.T) {
 		Executor: NewExecutor("node_1", store, &fakeWorkspace{}, &fakeRuntime{}),
 		Status:   validStatus,
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- daemon.Run(ctx) }()
-	select {
-	case <-gateway.heartbeats:
-	case <-time.After(time.Second):
-		t.Fatal("daemon did not recover from the rejected credential")
+	recovered, err := daemon.recoverAuthentication(context.Background(), &controlplane.HTTPError{StatusCode: 401})
+	if !recovered || err == nil {
+		t.Fatalf("authentication rejection recovery = %v, %v", recovered, err)
 	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if gateway.invalidated.Load() != 1 || gateway.registered.Load() != 1 {
-		t.Fatalf("invalidations = %d, registrations = %d, want 1 each", gateway.invalidated.Load(), gateway.registered.Load())
+	if gateway.invalidated.Load() != 0 || gateway.registered.Load() != 0 {
+		t.Fatalf("invalidations = %d registrations = %d; bootstrap must not be retried", gateway.invalidated.Load(), gateway.registered.Load())
 	}
 }

@@ -15,6 +15,10 @@ type fakeWorkspace struct {
 	syncErr  error
 }
 
+func (*fakeWorkspace) Path(serviceID string) (string, error) {
+	return "/work/" + serviceID, nil
+}
+
 func (w *fakeWorkspace) Restore(_ context.Context, _ controlplane.Command) (string, error) {
 	w.restores++
 	return "/work/service_1", nil
@@ -34,14 +38,15 @@ func (w *fakeWorkspace) Release(context.Context, controlplane.Command) error {
 }
 
 type fakeRuntime struct {
-	starts  int
-	stops   int
-	running []RunningService
+	starts   int
+	stops    int
+	running  []RunningService
+	startErr error
 }
 
 func (r *fakeRuntime) Start(context.Context, controlplane.Command, string) error {
 	r.starts++
-	return nil
+	return r.startErr
 }
 func (r *fakeRuntime) Stop(context.Context, controlplane.Command) error {
 	r.stops++
@@ -89,6 +94,7 @@ func TestDifferentAssignmentIsRejectedWhileServiceActive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	workspace, runtime := &fakeWorkspace{}, &fakeRuntime{}
 	executor := NewExecutor("node_1", store, workspace, runtime)
 	if _, err := executor.Execute(context.Background(), testCommand(controlplane.RestoreAndStart, "start_1", "node_1", "assignment_1")); err != nil {
@@ -100,6 +106,31 @@ func TestDifferentAssignmentIsRejectedWhileServiceActive(t *testing.T) {
 	}
 	if result.Status != "failed" || workspace.restores != 1 || runtime.starts != 1 {
 		t.Fatalf("different assignment was not rejected safely: %#v", result)
+	}
+}
+
+func TestStartingStateResumesWithoutReplacingWorkspace(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &fakeWorkspace{}
+	runtime := &fakeRuntime{startErr: errors.New("Docker temporarily unavailable")}
+	executor := NewExecutor("node_1", store, workspace, runtime)
+	command := testCommand(controlplane.RestoreAndStart, "start_1", "node_1", "assignment_1")
+	if _, err := executor.Execute(context.Background(), command); err == nil {
+		t.Fatal("initial Docker failure was not retained for retry")
+	}
+	active, exists, err := store.Active(command.ServiceID)
+	if err != nil || !exists || active.Phase != "starting" {
+		t.Fatalf("starting state = %#v exists=%v err=%v", active, exists, err)
+	}
+	runtime.startErr = nil
+	if result, err := executor.Execute(context.Background(), command); err != nil || result.Status != "started" {
+		t.Fatalf("starting resume = %#v, %v", result, err)
+	}
+	if workspace.restores != 1 || runtime.starts != 2 {
+		t.Fatalf("resume restored workspace again: restores=%d starts=%d", workspace.restores, runtime.starts)
 	}
 }
 
@@ -133,16 +164,20 @@ func TestFailedSyncRetainsActiveAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	stop := testCommand(controlplane.StopAndSync, "stop_1", "node_1", "assignment_1")
-	result, err := executor.Execute(context.Background(), stop)
-	if err != nil {
-		t.Fatal(err)
+	_, err = executor.Execute(context.Background(), stop)
+	var retry *RetryableError
+	if !errors.As(err, &retry) {
+		t.Fatalf("sync failure error = %v, want retryable", err)
 	}
 	active, exists, err := store.Active("service_1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "failed" || !exists || active.AssignmentID != "assignment_1" || runtime.stops != 1 {
-		t.Fatalf("failed sync incorrectly released assignment: %#v %#v %v", result, active, exists)
+	if !exists || active.AssignmentID != "assignment_1" || runtime.stops != 1 {
+		t.Fatalf("failed sync incorrectly released assignment: %#v %v", active, exists)
+	}
+	if _, cached, err := store.Result(stop.CommandID); err != nil || cached {
+		t.Fatalf("transient stop was cached: cached=%v err=%v", cached, err)
 	}
 }
 
@@ -186,14 +221,14 @@ func TestDaemonDoesNotReportStopBeforeSuccessfulSync(t *testing.T) {
 	if len(gateway.Started) != 1 || gateway.Started[0].Endpoint != (controlplane.Endpoint{Host: "public-node.example", Port: 25565}) {
 		t.Fatalf("started endpoint = %#v", gateway.Started)
 	}
-	if err := daemon.Process(context.Background(), testCommand(controlplane.StopAndSync, "stop_1", "node_1", "assignment_1")); err != nil {
-		t.Fatal(err)
+	if err := daemon.Process(context.Background(), testCommand(controlplane.StopAndSync, "stop_1", "node_1", "assignment_1")); err == nil {
+		t.Fatal("transient sync failure was acknowledged")
 	}
 	if len(gateway.Synced) != 0 {
 		t.Fatal("reported stopped-and-synced despite failed manifest publication")
 	}
-	if got := gateway.Acks["stop_1"].Status; got != "failed" {
-		t.Fatalf("stop result acknowledgement = %q", got)
+	if _, acknowledged := gateway.Acks["stop_1"]; acknowledged {
+		t.Fatal("transient stop failure was acknowledged")
 	}
 	if workspace.releases != 0 {
 		t.Fatal("released local workspace despite failed sync")

@@ -22,7 +22,8 @@ container, and syncs immutable revisions before acknowledging a stop.
 - The agent has no S3 access key, secret key, List, Delete, bucket-stat, or
   arbitrary-key operation. It never stores URL grants.
 - Containers run as UID/GID `1000`, have a read-only root filesystem, one
-  writable `/data` bind mount, no capabilities, no-new-privileges, a PID
+  non-recursive writable `/data` bind mount for their direct workspace only,
+  no capabilities, no-new-privileges, a PID
   limit, a memory hard limit, disabled swap, and CPU controls.
 - `XMCL_CONTAINER_IMAGE` must be an immutable
   `ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:...` digest. Mutable
@@ -104,9 +105,11 @@ out of scope.
 Provision the root-owned `/usr/local/libexec/xmcl-quota-helper` with mode
 `4750`, group `xmcl-agent`, and a root-owned mode-`0600`
 `/etc/xmcl-shared-node-agent/quota-helper.json` based on
-`deploy/systemd/quota-helper.json.example`. The agent can request a quota only
-for a direct workspace child; it fails closed when the helper or hard quota is
-unavailable.
+`deploy/systemd/quota-helper.json.example`. The agent can request a quota or
+ownership transition only for a direct workspace child; it fails closed when
+the helper or hard quota is unavailable. The helper grants UID/GID `1000`
+exclusive access only while that workspace is mounted, then seals it back to
+the agent after Docker stops for sync.
 
 ## Workspace storage operations
 
@@ -119,9 +122,11 @@ or another private monitoring network.
 
 The binary uses an outbound HTTPS long-poll client. Bootstrap registration
 exchanges `XMCL_CONTROL_PLANE_CREDENTIAL` for an atomically persisted,
-mode-`0600` short-lived node credential. On restart it reuses that credential
-instead of enrolling again. Only a control-plane `401` or `403` invalidates it;
-the agent removes the rejected credential and enrolls again. Every request has the required
+mode-`0600` short-lived node credential and its expiry. It rotates that
+credential over the authenticated control-plane transport before expiry. On
+restart it reuses and rotates the persisted credential instead of enrolling
+again; a consumed bootstrap credential is never retried after normal expiry or
+rejection. Every request has the required
 timestamp, nonce, body hash, and HMAC signature; no control-plane port is
 opened on a compute node. It sends a heartbeat immediately after registration
 and on a fixed cadence, retrying transient transport failures with bounded
