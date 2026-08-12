@@ -21,6 +21,7 @@ type Daemon struct {
 	Reporter          controlplane.Reporter
 	Executor          *Executor
 	Status            func() controlplane.NodeStatus
+	Ready             func() error
 	HeartbeatInterval time.Duration
 }
 
@@ -118,6 +119,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	if err := d.heartbeat(ctx); err != nil {
 		return fmt.Errorf("send initial heartbeat: %w", err)
+	}
+	if d.Ready != nil {
+		if err := d.Ready(); err != nil {
+			return fmt.Errorf("record node readiness: %w", err)
+		}
 	}
 	heartbeatContext, stopHeartbeats := context.WithCancel(ctx)
 	defer stopHeartbeats()

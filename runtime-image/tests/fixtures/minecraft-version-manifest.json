@@ -1,0 +1,9 @@
+{
+  "versions": [
+    {"id": "legacy", "sha1": "", "url": "https://piston-meta.mojang.com/v1/packages/legacy.json"},
+    {"id": "alpha", "sha1": "", "url": "https://piston-meta.mojang.com/v1/packages/alpha.json"},
+    {"id": "gamma", "sha1": "", "url": "https://piston-meta.mojang.com/v1/packages/gamma.json"},
+    {"id": "delta", "sha1": "", "url": "https://piston-meta.mojang.com/v1/packages/delta.json"},
+    {"id": "epsilon", "sha1": "", "url": "https://piston-meta.mojang.com/v1/packages/epsilon.json"}
+  ]
+}

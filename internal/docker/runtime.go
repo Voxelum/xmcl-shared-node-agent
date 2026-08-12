@@ -25,6 +25,7 @@ import (
 
 const cpuPeriod int64 = 100000
 const privateNetwork = "xmcl-shared-private"
+const runtimeCatalogLabel = "io.xmcl.runtime-catalog-sha256"
 
 const (
 	resourceMemoryLabel    = "xmcl.memory-mib"
@@ -55,8 +56,12 @@ func (r *Runtime) Validate(ctx context.Context) error {
 	if _, err := r.client.Ping(ctx); err != nil {
 		return fmt.Errorf("ping Docker daemon: %w", err)
 	}
-	if _, _, err := r.client.ImageInspectWithRaw(ctx, r.image); err != nil {
+	image, _, err := r.client.ImageInspectWithRaw(ctx, r.image)
+	if err != nil {
 		return fmt.Errorf("inspect configured container image: %w", err)
+	}
+	if err := ValidateRuntimeCatalogLabels(image.Config.Labels); err != nil {
+		return err
 	}
 	if _, err := r.client.NetworkInspect(ctx, privateNetwork, network.InspectOptions{}); err != nil {
 		if !errdefs.IsNotFound(err) {
@@ -68,6 +73,13 @@ func (r *Runtime) Validate(ctx context.Context) error {
 		}); err != nil {
 			return fmt.Errorf("create private container network: %w", err)
 		}
+	}
+	return nil
+}
+
+func ValidateRuntimeCatalogLabels(labels map[string]string) error {
+	if labels[runtimeCatalogLabel] != runtimecontract.CatalogSHA256() {
+		return errors.New("configured container image runtime catalog does not match the agent")
 	}
 	return nil
 }

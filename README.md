@@ -1,9 +1,15 @@
-# XMCL Shared Node Agent
+# XMCL Shared Node Runtime
 
 The shared-node agent is the privileged, Go-based execution component for one
-Vultr shared-hosting compute node. It restores verified Minecraft workspaces
+shared-hosting compute node. It restores verified Minecraft workspaces
 through short-lived command-scoped S3 SigV4 URL grants, runs a hardened Docker
 container, and syncs immutable revisions before acknowledging a stop.
+
+This repository is the canonical source for the host agent, quota helper,
+Minecraft runtime image, LightNode bootstrap, and the independently deployed
+JavaScript compiler worker under [`compiler/`](compiler/README.md). The
+compiler remains an egress-isolated service and is never embedded in the
+privileged node agent or Minecraft runtime image.
 
 ## Safety properties
 
@@ -66,16 +72,18 @@ XMCL_METRICS_ADDR=127.0.0.1:9464
 `XMCL_CONTAINER_IMAGE` is the generic multi-JRE image only. It must contain the
 same reviewed catalog revision compiled into this binary (currently Java 8, 16,
 17, 21, and 25), and its health check probes local port 25565.
-Update `internal/runtime/catalog.json` only from a reviewed runtime-image
-`runtime-catalog.lock.json` and deploy it with the image built from that same
-lock; no environment variable, command, or customer content can choose it.
+Update `internal/runtime/catalog.json` only through
+`runtime-image/scripts/sync_agent_catalog.py` from the reviewed
+`runtime-image/runtime-catalog.lock.json` and deploy it with the image built
+from that same lock; no environment variable, command, or customer content can
+choose it.
 The image writes `eula=true` only when the control plane sends the
 server-side policy-approved `eulaAccepted` command field; missing approval is a
-launch failure. The image supply chain is owned by
-[`Voxelum/xmcl-shared-minecraft-runtime`](https://github.com/Voxelum/xmcl-shared-minecraft-runtime).
-The release pipeline must materialize and hash-verify the JRE assets described
-by that repository's `runtime-assets.lock.json` before building and publishing
-the digest.
+launch failure. The image supply chain now lives in
+[`runtime-image/`](runtime-image/README.md) in this repository. One protected
+release builds the agent, quota helper, fixed runtime entrypoint, and image from
+the same commit and writes `release-manifest.json` binding their hashes to the
+image digest and raw runtime-catalog SHA-256.
 
 `XMCL_VULTR_OBJECT_STORAGE_ENDPOINT` must be the Vultr HTTPS origin and
 `XMCL_VULTR_OBJECT_STORAGE_BUCKET` is used only to verify a grant's path-style
@@ -145,9 +153,31 @@ the assignment ID. After a healthy start it reports only
 
 ## Install
 
+LightNode nodes use the reviewed SSH bootstrap flow in
+[`deploy/lightnode/README.md`](deploy/lightnode/README.md). It installs the
+same service only on a pinned plain Ubuntu image and removes the one-time
+enrollment token after the control plane accepts the first heartbeat.
+
 ```sh
 go build -o xmcl-shared-node-agent ./cmd/xmcl-shared-node-agent
 install -m 0644 deploy/systemd/xmcl-shared-node-agent.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now xmcl-shared-node-agent
 ```
+
+## Unified release
+
+`.github/workflows/publish.yml` publishes the Linux agent and quota-helper
+binaries as GitHub release assets and the runtime image to GHCR. It also emits
+an immutable release manifest consumed by provisioning. LightNode bootstrap
+accepts only a SHA-256-pinned copy of that manifest and derives every binary
+hash and the image/catalog digest from it. The GHCR package must be configured
+as public before a node can anonymously pull its pinned digest; the workflow
+never injects a long-lived registry credential into a node.
+
+Before the first publish, grant this repository's Actions **Write** access to
+both existing GHCR packages. Make only
+`xmcl-shared-minecraft-runtime` public for credential-free node pulls; the
+internal `xmcl-shared-minecraft-compiler` package may remain private. Also
+create the protected `runtime-release` environment in this repository. Those
+GitHub settings do not transfer automatically from the retired repositories.

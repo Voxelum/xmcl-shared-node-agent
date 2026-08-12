@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -79,6 +81,28 @@ func TestLoadRequiresImmutableXMCLRuntimeImage(t *testing.T) {
 	t.Setenv("XMCL_CONTAINER_IMAGE", "minecraft:latest")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "XMCL_CONTAINER_IMAGE") {
 		t.Fatalf("mutable container image was unexpectedly accepted: %v", err)
+	}
+}
+
+func TestLoadAllowsConsumedBootstrapWithPersistedNodeCredential(t *testing.T) {
+	setCanonicalEnvironment(t)
+	stateRoot := t.TempDir()
+	t.Setenv("XMCL_STATE_ROOT", stateRoot)
+	t.Setenv("XMCL_CONTROL_PLANE_CREDENTIAL", "")
+	if err := os.WriteFile(filepath.Join(stateRoot, "control-plane-credential"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadRequiresBootstrapWithoutPersistedNodeCredential(t *testing.T) {
+	setCanonicalEnvironment(t)
+	t.Setenv("XMCL_STATE_ROOT", t.TempDir())
+	t.Setenv("XMCL_CONTROL_PLANE_CREDENTIAL", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "XMCL_CONTROL_PLANE_CREDENTIAL") {
+		t.Fatalf("missing enrollment credential was accepted: %v", err)
 	}
 }
 

@@ -1,0 +1,12 @@
+{
+  "java-runtime-gamma": [
+    {
+      "architecture": "x64",
+      "features": [],
+      "os": "linux",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "size": 1,
+      "url": "https://static.azul.com/zulu/bin/zulu17-test-linux_x64.tar.gz"
+    }
+  ]
+}

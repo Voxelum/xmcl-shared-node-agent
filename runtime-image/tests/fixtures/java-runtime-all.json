@@ -1,0 +1,9 @@
+{
+  "linux": {
+    "java-runtime-alpha": [{"availability": {"progress": 100}, "manifest": {"sha1": "", "size": 1, "url": "https://piston-meta.mojang.com/v1/packages/alpha-runtime.json"}, "version": {"name": "16.0.1", "released": "2021-05-10T00:00:00+00:00"}}],
+    "java-runtime-delta": [{"availability": {"progress": 100}, "manifest": {"sha1": "", "size": 1, "url": "https://piston-meta.mojang.com/v1/packages/delta-runtime.json"}, "version": {"name": "21.0.1", "released": "2023-01-01T00:00:00+00:00"}}],
+    "java-runtime-epsilon": [{"availability": {"progress": 100}, "manifest": {"sha1": "", "size": 1, "url": "https://piston-meta.mojang.com/v1/packages/epsilon-runtime.json"}, "version": {"name": "25.0.1", "released": "2025-01-01T00:00:00+00:00"}}],
+    "java-runtime-gamma": [{"availability": {"progress": 100}, "manifest": {"sha1": "", "size": 1, "url": "https://piston-meta.mojang.com/v1/packages/gamma-runtime.json"}, "version": {"name": "17.0.1", "released": "2021-01-01T00:00:00+00:00"}}],
+    "jre-legacy": [{"availability": {"progress": 100}, "manifest": {"sha1": "", "size": 1, "url": "https://piston-meta.mojang.com/v1/packages/legacy-runtime.json"}, "version": {"name": "8u202", "released": "2020-01-01T00:00:00+00:00"}}]
+  }
+}

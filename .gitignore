@@ -1,7 +1,14 @@
 # Go build outputs
-xmcl-shared-node-agent
-xmcl-shared-node-agent.exe
+/xmcl-shared-node-agent
+/xmcl-shared-node-agent.exe
 
 # Local state and secrets
 .env
 agent-state/
+
+# Materialized, checksum-verified runtime image inputs
+/dist/
+/runtime-image/runtime-assets/
+/runtime-image/runtime-assets.tar.zst
+__pycache__/
+*.pyc

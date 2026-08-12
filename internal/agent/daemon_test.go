@@ -72,6 +72,36 @@ func TestDaemonSendsHeartbeatAfterRegistration(t *testing.T) {
 	}
 }
 
+func TestDaemonRecordsReadinessAfterConfirmedHeartbeat(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := &daemonGateway{heartbeats: make(chan struct{}, 1)}
+	ready := make(chan struct{}, 1)
+	daemon := Daemon{
+		NodeID: "node_1", Source: gateway, Reporter: gateway,
+		Executor: NewExecutor("node_1", store, &fakeWorkspace{}, &fakeRuntime{}),
+		Status:   validStatus,
+		Ready: func() error {
+			ready <- struct{}{}
+			return nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx) }()
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not record readiness after its initial heartbeat")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 type transientSource struct {
 	daemonGateway
 	calls atomic.Int32

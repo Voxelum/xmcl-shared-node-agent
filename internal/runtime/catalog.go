@@ -30,6 +30,10 @@ type catalog struct {
 
 var reviewedCatalog = mustLoadCatalog()
 
+func CatalogSHA256() string {
+	return reviewedCatalog.SHA256
+}
+
 func mustLoadCatalog() catalog {
 	var value catalog
 	if err := json.Unmarshal(catalogJSON, &value); err != nil {

@@ -1,0 +1,58 @@
+name: Update reviewed compiler toolchain catalog
+
+on:
+  schedule:
+    - cron: "23 4 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-reviewed-toolchain-catalog
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Validate reviewed runtime lock
+        run: >-
+          python3 runtime-image/scripts/validate_runtime_catalog.py
+          --lock runtime-image/runtime-catalog.lock.json
+
+      - name: Refresh reviewed compiler catalog candidates
+        run: >-
+          node compiler/scripts/update_toolchain_catalog.mjs
+          --runtime-catalog-lock runtime-image/runtime-catalog.lock.json
+
+      - name: Validate generated compiler lock
+        run: >-
+          node compiler/scripts/validate_toolchain_catalog.mjs
+          --runtime-catalog-lock runtime-image/runtime-catalog.lock.json
+
+      - name: Open review pull request when the lock changed
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          branch: automation/update-toolchain-catalog
+          delete-branch: true
+          title: "chore: update reviewed toolchain catalog"
+          commit-message: |-
+            chore: update reviewed toolchain catalog
+
+            Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+          body: |-
+            Generated from the reviewed runtime lock and official Forge, Fabric,
+            NeoForge, Quilt, and Mojang metadata. Review the exact URLs, sizes,
+            checksums, runtime revision, and supported compatibility tuples before merge.

@@ -65,7 +65,6 @@ func Load() (Config, error) {
 		{"XMCL_SHARED_NODE_ID", &c.NodeID},
 		{"XMCL_SHARED_NODE_REGION", &c.Region},
 		{"XMCL_CONTROL_PLANE_URL", &c.ControlPlaneURL},
-		{"XMCL_CONTROL_PLANE_CREDENTIAL", &c.ControlPlaneCredential},
 		{"XMCL_SHARED_NODE_INGRESS_HOST", &c.IngressHost},
 		{"XMCL_VULTR_OBJECT_STORAGE_ENDPOINT", &c.ObjectStorageEndpoint},
 		{"XMCL_VULTR_OBJECT_STORAGE_REGION", &c.ObjectStorageRegion},
@@ -108,6 +107,14 @@ func Load() (Config, error) {
 	c.StateRoot, err = filepath.Abs(c.StateRoot)
 	if err != nil {
 		return Config{}, fmt.Errorf("resolve state root: %w", err)
+	}
+	c.ControlPlaneCredential = os.Getenv("XMCL_CONTROL_PLANE_CREDENTIAL")
+	if c.ControlPlaneCredential == "" {
+		credentialPath := filepath.Join(c.StateRoot, "control-plane-credential")
+		info, statErr := os.Stat(credentialPath)
+		if statErr != nil || !info.Mode().IsRegular() {
+			return Config{}, fmt.Errorf("XMCL_CONTROL_PLANE_CREDENTIAL is required without a persisted node credential")
+		}
 	}
 	stopSeconds, err := getInt("XMCL_RCON_STOP_TIMEOUT_SECONDS", 1)
 	if err != nil {

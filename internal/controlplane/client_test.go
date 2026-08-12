@@ -126,6 +126,9 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	if err := client.Register(ctx, NodeCapacity{TotalMemoryMiB: 2048, TotalSharedCPU: 2, TotalWorkspaceGiB: 10}); err != nil {
 		t.Fatal(err)
 	}
+	if client.bootstrapCredential != "" {
+		t.Fatal("consumed bootstrap credential remained in memory")
+	}
 	if err := client.Heartbeat(ctx, NodeStatus{
 		ContractVersion: SharedNodeContractVersion,
 		Status:          "ready",

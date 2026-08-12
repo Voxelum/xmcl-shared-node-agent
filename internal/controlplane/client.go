@@ -149,7 +149,11 @@ func (c *Client) Register(ctx context.Context, capacity NodeCapacity) error {
 	if registered.NodeID != c.nodeID {
 		return errors.New("registration response has a different node ID")
 	}
-	return c.setCredential(registered.Credential, registered.ExpiresAt)
+	if err := c.setCredential(registered.Credential, registered.ExpiresAt); err != nil {
+		return err
+	}
+	c.bootstrapCredential = ""
+	return nil
 }
 
 // CredentialNeedsRotation reports whether the credential is close enough to

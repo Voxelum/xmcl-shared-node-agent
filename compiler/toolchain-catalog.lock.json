@@ -1,0 +1,189 @@
+{
+  "approvedArtifactHosts": [
+    "maven.fabricmc.net",
+    "maven.minecraftforge.net",
+    "maven.neoforged.net",
+    "maven.quiltmc.org",
+    "piston-data.mojang.com"
+  ],
+  "catalogRevision": "360d80c951de0baa1ac11481bae616ecd20c816f6f7a93e7f2b92c98a9e1db96",
+  "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3",
+  "schemaVersion": 1,
+  "toolchains": [
+    {
+      "artifacts": [
+        {
+          "coordinate": "com.mojang:minecraft-server:1.12.2:server",
+          "role": "dependency",
+          "sha256": "fe1f9274e6dad9191bf6e6e8e36ee6ebc737f373603df0946aafcded0d53167e",
+          "sizeBytes": 30222121,
+          "url": "https://piston-data.mojang.com/v1/objects/886945bfb2b978778c3a0288fd7fab09d315b25f/server.jar"
+        },
+        {
+          "coordinate": "net.minecraftforge:forge:1.12.2-14.23.5.2859:installer",
+          "role": "primary",
+          "sha256": "dbba1cd1bf34a4b82148bac50a6150f63ffcb2d5dc7d88a0508c27fdcff15b76",
+          "sizeBytes": 4681890,
+          "url": "https://maven.minecraftforge.net/net/minecraftforge/forge/1.12.2-14.23.5.2859/forge-1.12.2-14.23.5.2859-installer.jar"
+        }
+      ],
+      "java": {
+        "component": "jre-legacy",
+        "major": 8
+      },
+      "jre": {
+        "component": "jre-legacy",
+        "id": "jre-legacy-8",
+        "major": 8,
+        "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3",
+        "sha256": "feda3bee5c1a33faf28c990da53f68e895af2b12ee692c1ded9a158a96ebaf73"
+      },
+      "launchTemplate": "forge-unix-args-v1",
+      "loader": {
+        "kind": "forge",
+        "version": "14.23.5.2859"
+      },
+      "minecraftVersion": "1.12.2"
+    },
+    {
+      "artifacts": [
+        {
+          "coordinate": "com.mojang:minecraft-server:1.17.1:server",
+          "role": "dependency",
+          "sha256": "e8c211b41317a9f5a780c98a89592ecb72eb39a6e475d4ac9657e5bc9ffaf55f",
+          "sizeBytes": 43626592,
+          "url": "https://piston-data.mojang.com/v1/objects/a16d67e5807f57fc4e550299cf20226194497dc2/server.jar"
+        },
+        {
+          "coordinate": "net.fabricmc:fabric-loader:0.12.12",
+          "role": "primary",
+          "sha256": "fcc7cf71c44ea633f598b876f438a5dfbd15d635325c5e4eee44b2792ebb0d1c",
+          "sizeBytes": 722025,
+          "url": "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.12.12/fabric-loader-0.12.12.jar"
+        }
+      ],
+      "java": {
+        "component": "java-runtime-alpha",
+        "major": 16
+      },
+      "jre": {
+        "component": "java-runtime-alpha",
+        "id": "java-runtime-alpha-16",
+        "major": 16,
+        "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3",
+        "sha256": "d2503deff4bd76f7a26e6a91e00d83f844e61dae8c9c7ae9b0a86714b6ee1755"
+      },
+      "launchTemplate": "fabric-server-jar-v1",
+      "loader": {
+        "kind": "fabric",
+        "version": "0.12.12"
+      },
+      "minecraftVersion": "1.17.1"
+    },
+    {
+      "artifacts": [
+        {
+          "coordinate": "com.mojang:minecraft-server:1.20.1:server",
+          "role": "dependency",
+          "sha256": "3af73a9dc5a102e38147946360dd27d4d70bae7055bf91cf2151cd5d121b79e0",
+          "sizeBytes": 47791053,
+          "url": "https://piston-data.mojang.com/v1/objects/84194a2f286ef7c14ed7ce0090dba59902951553/server.jar"
+        },
+        {
+          "coordinate": "net.fabricmc:fabric-loader:0.15.11",
+          "role": "primary",
+          "sha256": "f58fca271b5b48dd4f8faad792b09002439e8444d50af670b8493de3b2d85f08",
+          "sizeBytes": 1327691,
+          "url": "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar"
+        }
+      ],
+      "java": {
+        "component": "java-runtime-gamma",
+        "major": 17
+      },
+      "jre": {
+        "component": "java-runtime-gamma",
+        "id": "java-runtime-gamma-17",
+        "major": 17,
+        "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3",
+        "sha256": "2776009de7656e34e2d7fac763f01d4c04c5071a8e344d2b48aa3691e3cc348d"
+      },
+      "launchTemplate": "fabric-server-jar-v1",
+      "loader": {
+        "kind": "fabric",
+        "version": "0.15.11"
+      },
+      "minecraftVersion": "1.20.1"
+    },
+    {
+      "artifacts": [
+        {
+          "coordinate": "com.mojang:minecraft-server:1.21.1:server",
+          "role": "dependency",
+          "sha256": "e3bc55693e93cda0188f2e60aea28113fc647c5e85a15fa3d1b347349231b4bb",
+          "sizeBytes": 51627615,
+          "url": "https://piston-data.mojang.com/v1/objects/59353fb40c36d304f2035d51e7d6e6baa98dc05c/server.jar"
+        },
+        {
+          "coordinate": "net.neoforged:neoforge:21.1.115:installer",
+          "role": "primary",
+          "sha256": "4e5fa52a13651a7ff32fd7753778b51bec0464c53de42dc61804304c60ccc77f",
+          "sizeBytes": 6861009,
+          "url": "https://maven.neoforged.net/releases/net/neoforged/neoforge/21.1.115/neoforge-21.1.115-installer.jar"
+        }
+      ],
+      "java": {
+        "component": "java-runtime-delta",
+        "major": 21
+      },
+      "jre": {
+        "component": "java-runtime-delta",
+        "id": "java-runtime-delta-21",
+        "major": 21,
+        "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3",
+        "sha256": "2b3bf58669d502aae932fc492019c1d33bc3439dce1d7951110802d55a8b427d"
+      },
+      "launchTemplate": "neoforge-unix-args-v1",
+      "loader": {
+        "kind": "neoforge",
+        "version": "21.1.115"
+      },
+      "minecraftVersion": "1.21.1"
+    },
+    {
+      "artifacts": [
+        {
+          "coordinate": "com.mojang:minecraft-server:26.2:server",
+          "role": "dependency",
+          "sha256": "cdacdfb25898de5e4b4b0e5ddcc2722f77067e46605709c2d886c000ebb63ec5",
+          "sizeBytes": 60894273,
+          "url": "https://piston-data.mojang.com/v1/objects/823e2250d24b3ddac457a60c92a6a941943fcd6a/server.jar"
+        },
+        {
+          "coordinate": "net.fabricmc:fabric-loader:0.19.3",
+          "role": "primary",
+          "sha256": "73eed8c34bbad0320a2a3cba5346351e822f74f82b3f3c060574068474132958",
+          "sizeBytes": 1976502,
+          "url": "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.19.3/fabric-loader-0.19.3.jar"
+        }
+      ],
+      "java": {
+        "component": "java-runtime-epsilon",
+        "major": 25
+      },
+      "jre": {
+        "component": "java-runtime-epsilon",
+        "id": "java-runtime-epsilon-25",
+        "major": 25,
+        "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3",
+        "sha256": "55c0d0a04b445460bc7bf7477f69467d95a5059ef032c8ef954e580cfaba6914"
+      },
+      "launchTemplate": "fabric-server-jar-v1",
+      "loader": {
+        "kind": "fabric",
+        "version": "0.19.3"
+      },
+      "minecraftVersion": "26.2"
+    }
+  ]
+}

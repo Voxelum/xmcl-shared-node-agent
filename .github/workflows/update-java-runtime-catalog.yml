@@ -1,0 +1,63 @@
+name: Update Mojang Java runtime catalog
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-java-runtime-catalog
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Generate checksum-pinned Mojang-first catalog
+        run: python3 runtime-image/scripts/update_runtime_catalog.py
+      - name: Synchronize the Go agent catalog
+        run: python3 runtime-image/scripts/sync_agent_catalog.py
+      - name: Synchronize the compiler toolchain catalog
+        run: >-
+          node compiler/scripts/update_toolchain_catalog.mjs
+          --runtime-catalog-lock runtime-image/runtime-catalog.lock.json
+      - name: Test generated runtime inputs
+        run: |
+          python3 -m unittest discover -s runtime-image/tests -v
+          python3 runtime-image/scripts/validate_runtime_catalog.py
+          python3 runtime-image/scripts/sync_agent_catalog.py --check
+          node compiler/scripts/validate_toolchain_catalog.mjs \
+            --runtime-catalog-lock runtime-image/runtime-catalog.lock.json
+          go test ./internal/runtime ./internal/docker
+      - name: Open a reviewable update pull request
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: automation/update-java-runtime-catalog
+          delete-branch: true
+          commit-message: "chore: update Mojang Java runtime catalog"
+          title: "chore: update Mojang Java runtime catalog"
+          body: |
+            Generated from official Mojang Linux x64 runtime and Minecraft
+            version metadata. The lock is checksum-pinned and the Go agent
+            catalog and compiler toolchain lock are regenerated from the same
+            reviewed source.
+          add-paths: |
+            runtime-image/runtime-catalog.lock.json
+            internal/runtime/catalog.json
+            compiler/toolchain-catalog.lock.json

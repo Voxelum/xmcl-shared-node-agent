@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "toolchains": [
+    {
+      "minecraftVersion": "1.12.2",
+      "loader": { "kind": "forge", "version": "14.23.5.2859" },
+      "java": { "component": "jre-legacy", "major": 8 }
+    },
+    {
+      "minecraftVersion": "1.17.1",
+      "loader": { "kind": "fabric", "version": "0.12.12" },
+      "java": { "component": "java-runtime-alpha", "major": 16 }
+    },
+    {
+      "minecraftVersion": "1.20.1",
+      "loader": { "kind": "fabric", "version": "0.15.11" },
+      "java": { "component": "java-runtime-gamma", "major": 17 }
+    },
+    {
+      "minecraftVersion": "1.21.1",
+      "loader": { "kind": "neoforge", "version": "21.1.115" },
+      "java": { "component": "java-runtime-delta", "major": 21 }
+    },
+    {
+      "minecraftVersion": "26.2",
+      "loader": { "kind": "fabric", "version": "0.19.3" },
+      "java": { "component": "java-runtime-epsilon", "major": 25 }
+    }
+  ]
+}

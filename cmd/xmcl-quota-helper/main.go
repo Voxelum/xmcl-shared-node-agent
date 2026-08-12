@@ -29,40 +29,50 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	if len(os.Args) == 2 && os.Args[1] == "check" {
-		fatal(run(config, "state"))
+	fatal(execute(config, os.Args[1:], run, agentIdentity, transitionOwnership))
+}
+
+func execute(
+	config config,
+	args []string,
+	runQuota func(config, string) error,
+	identity func(config) (int, int, error),
+	transition func(string, int, int) error,
+) error {
+	if len(args) == 1 && args[0] == "check" {
+		return runQuota(config, "state")
 	}
-	if len(os.Args) == 4 && (os.Args[1] == "prepare" || os.Args[1] == "seal") &&
-		os.Args[2] == "--directory" {
-		directory := os.Args[3]
+	if len(args) == 3 && (args[0] == "prepare" || args[0] == "seal") &&
+		args[1] == "--directory" {
+		directory := args[2]
 		if err := validateDirectory(config, directory); err != nil {
-			fatal(err)
+			return err
 		}
-		uid, gid, err := agentIdentity(config)
+		uid, gid, err := identity(config)
 		if err != nil {
-			fatal(err)
+			return err
 		}
-		if os.Args[1] == "prepare" {
-			fatal(transitionOwnership(directory, 1000, 1000))
+		if args[0] == "prepare" {
+			return transition(directory, 1000, 1000)
 		}
-		fatal(transitionOwnership(directory, uid, gid))
+		return transition(directory, uid, gid)
 	}
-	if len(os.Args) != 6 || os.Args[1] != "apply" || os.Args[2] != "--directory" || os.Args[4] != "--gib" {
-		fatal(errors.New("invalid quota helper arguments"))
+	if len(args) != 5 || args[0] != "apply" || args[1] != "--directory" || args[3] != "--gib" {
+		return errors.New("invalid quota helper arguments")
 	}
-	directory, gib := os.Args[3], os.Args[5]
+	directory, gib := args[2], args[4]
 	if err := validateDirectory(config, directory); err != nil {
-		fatal(err)
+		return err
 	}
 	limit, err := strconv.ParseInt(gib, 10, 64)
 	if err != nil || limit < 1 {
-		fatal(errors.New("quota limit must be positive"))
+		return errors.New("quota limit must be positive")
 	}
 	id := projectID(config.ProjectBase, directory)
-	if err := run(config, "project -s -p "+directory+" "+id); err != nil {
-		fatal(err)
+	if err := runQuota(config, "project -s -p "+directory+" "+id); err != nil {
+		return err
 	}
-	fatal(run(config, "limit -p bhard="+strconv.FormatInt(limit, 10)+"g "+id))
+	return runQuota(config, "limit -p bhard="+strconv.FormatInt(limit, 10)+"g "+id)
 }
 
 func loadConfig() (config, error) {

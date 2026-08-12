@@ -2,10 +2,28 @@ package docker
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
+	runtimecontract "github.com/voxelum/xmcl-shared-node-agent/internal/runtime"
 )
+
+func TestRuntimeImageRequiresMatchingCatalogLabel(t *testing.T) {
+	if err := ValidateRuntimeCatalogLabels(map[string]string{
+		runtimeCatalogLabel: runtimecontract.CatalogSHA256(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, labels := range []map[string]string{
+		nil,
+		{runtimeCatalogLabel: strings.Repeat("0", 64)},
+	} {
+		if err := ValidateRuntimeCatalogLabels(labels); err == nil {
+			t.Fatal("runtime image with a missing or mismatched catalog label was accepted")
+		}
+	}
+}
 
 func TestBuildCreateRequestHardensContainer(t *testing.T) {
 	command := controlplane.Command{
