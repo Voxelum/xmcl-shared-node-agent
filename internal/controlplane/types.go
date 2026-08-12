@@ -159,8 +159,17 @@ type NodeStatus struct {
 	ContractVersion int               `json:"contractVersion"`
 	Status          string            `json:"status"`
 	Capacity        AvailableCapacity `json:"capacity"`
+	Services        []ServiceStatus   `json:"services,omitempty"`
 	AgentVersion    string            `json:"agentVersion"`
 	Ingress         Ingress           `json:"ingress"`
+}
+
+type ServiceStatus struct {
+	ServiceID      string  `json:"serviceId"`
+	AssignmentID   string  `json:"assignmentId"`
+	CPUPercent     float64 `json:"cpuPercent"`
+	MemoryUsageMiB int64   `json:"memoryUsageMiB"`
+	MemoryLimitMiB int64   `json:"memoryLimitMiB"`
 }
 
 type AvailableCapacity struct {
@@ -180,14 +189,31 @@ const WorkspaceGrantContractVersion = 2
 var ingressHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
 
 func (s NodeStatus) Valid() bool {
-	return s.ContractVersion == SharedNodeContractVersion &&
-		(s.Status == "ready" || s.Status == "draining") &&
-		s.Capacity.FreeWorkspaceGiB >= 0 &&
-		s.Capacity.AllocatableMemoryMiB >= 0 &&
-		s.Capacity.AllocatableSharedCPU >= 0 &&
-		s.Capacity.ActiveContainerCount >= 0 &&
-		s.AgentVersion != "" && len(s.AgentVersion) <= 128 &&
-		validIngressHost(s.Ingress.Host)
+	if s.ContractVersion != SharedNodeContractVersion ||
+		(s.Status != "ready" && s.Status != "draining") ||
+		s.Capacity.FreeWorkspaceGiB < 0 ||
+		s.Capacity.AllocatableMemoryMiB < 0 ||
+		s.Capacity.AllocatableSharedCPU < 0 ||
+		s.Capacity.ActiveContainerCount < 0 ||
+		s.AgentVersion == "" || len(s.AgentVersion) > 128 ||
+		!validIngressHost(s.Ingress.Host) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(s.Services))
+	for _, service := range s.Services {
+		key := service.ServiceID + "\x00" + service.AssignmentID
+		if service.ServiceID == "" || service.AssignmentID == "" ||
+			service.CPUPercent < 0 || service.CPUPercent > 10000 ||
+			service.MemoryUsageMiB < 0 || service.MemoryLimitMiB < 1 ||
+			service.MemoryUsageMiB > service.MemoryLimitMiB {
+			return false
+		}
+		if _, exists := seen[key]; exists {
+			return false
+		}
+		seen[key] = struct{}{}
+	}
+	return true
 }
 
 func validIngressHost(host string) bool {

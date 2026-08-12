@@ -55,9 +55,11 @@ func retryable(err error) error {
 }
 
 type RunningService struct {
-	ServiceID    string
-	AssignmentID string
-	Resources    controlplane.Resources
+	ServiceID      string
+	AssignmentID   string
+	Resources      controlplane.Resources
+	CPUPercent     float64
+	MemoryUsageMiB int64
 }
 
 type RunningServiceProvider interface {

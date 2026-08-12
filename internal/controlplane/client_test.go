@@ -76,7 +76,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 		case "/v1/internal/shared-nodes/register":
 			_, _ = w.Write([]byte(`{"nodeId":"node-1","credential":"node-1.initial-secret","expiresAt":"2026-01-01T00:00:00Z"}`))
 		case "/v1/internal/shared-nodes/node-1/heartbeat":
-			if string(body) != `{"contractVersion":1,"status":"ready","capacity":{"freeWorkspaceGiB":8,"allocatableMemoryMiB":1536,"allocatableSharedCpu":1,"activeContainerCount":1},"agentVersion":"test-agent","ingress":{"host":"public-node.example"}}` {
+			if string(body) != `{"contractVersion":1,"status":"ready","capacity":{"freeWorkspaceGiB":8,"allocatableMemoryMiB":1536,"allocatableSharedCpu":1,"activeContainerCount":1},"services":[{"serviceId":"service-1","assignmentId":"assignment-1","cpuPercent":37.5,"memoryUsageMiB":768,"memoryLimitMiB":2048}],"agentVersion":"test-agent","ingress":{"host":"public-node.example"}}` {
 				t.Fatalf("heartbeat body = %s", body)
 			}
 			_, _ = w.Write([]byte(`{"ok":true}`))
@@ -132,6 +132,10 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 		Capacity: AvailableCapacity{
 			FreeWorkspaceGiB: 8, AllocatableMemoryMiB: 1536, AllocatableSharedCPU: 1, ActiveContainerCount: 1,
 		},
+		Services: []ServiceStatus{{
+			ServiceID: "service-1", AssignmentID: "assignment-1",
+			CPUPercent: 37.5, MemoryUsageMiB: 768, MemoryLimitMiB: 2048,
+		}},
 		AgentVersion: "test-agent",
 		Ingress:      Ingress{Host: "public-node.example"},
 	}); err != nil {
