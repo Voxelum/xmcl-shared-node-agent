@@ -267,5 +267,5 @@ limits. A default image being live is not evidence that it is ready to compile.
 tests and publishes only a unique
 `sha-<full-git-sha>` GHCR tag, and attaches BuildKit provenance and SBOM
 attestations. Tags are convenience references; deploy the resulting immutable
-`ghcr.io/voxelum/xmcl-shared-minecraft-compiler@sha256:...` digest after
+`ghcr.io/voxelum/xmcl-shared-node-compiler@sha256:...` digest after
 verifying the provenance and SBOM. The workflow never publishes `latest`.

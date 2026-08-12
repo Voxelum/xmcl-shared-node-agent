@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE_NAME: ghcr.io/voxelum/xmcl-shared-minecraft-compiler
+  IMAGE_NAME: ghcr.io/voxelum/xmcl-shared-node-compiler
 
 jobs:
   publish:
