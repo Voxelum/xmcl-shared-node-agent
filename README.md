@@ -175,9 +175,8 @@ hash and the image/catalog digest from it. The GHCR package must be configured
 as public before a node can anonymously pull its pinned digest; the workflow
 never injects a long-lived registry credential into a node.
 
-Before the first publish, grant this repository's Actions **Write** access to
-both existing GHCR packages. Make only
-`xmcl-shared-minecraft-runtime` public for credential-free node pulls; the
-internal `xmcl-shared-minecraft-compiler` package may remain private. Also
-create the protected `runtime-release` environment in this repository. Those
-GitHub settings do not transfer automatically from the retired repositories.
+The existing `xmcl-shared-minecraft-runtime` GHCR package grants this
+repository's Actions **Write** access and is public for credential-free node
+pulls. The private `xmcl-shared-node-compiler` package is created and owned by
+this repository directly. The `runtime-release` environment permits releases
+from `main` only.
