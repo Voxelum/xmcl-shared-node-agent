@@ -24,10 +24,12 @@ func writeDescriptor(t *testing.T, root, body string) {
 }
 
 func descriptor(minecraft, component string, major int, loader, loaderVersion string) string {
-	return `{"schemaVersion":1,"minecraftVersion":"` + minecraft + `","java":{"component":"` +
-		component + `","major":` + strconv.Itoa(major) + `},"runtimeCatalog":{"sha256":"` +
-		reviewedCatalog.SHA256 +
-		`"},"loader":{"kind":"` + loader + `","version":"` + loaderVersion + `"},"launch":{"kind":"generated-server-launcher","path":".xmcl/launch.sh","arguments":[]},"contentSha256":"` + contentSHA + `"}`
+	return `{"schemaVersion":1,"runtimeCatalogRevision":"` + reviewedCatalog.SHA256 +
+		`","minecraftVersion":"` + minecraft + `","loader":{"kind":"` + loader +
+		`","version":"` + loaderVersion + `"},"java":{"component":"` + component +
+		`","major":` + strconv.Itoa(major) + `,"jreId":"` + component + `-` +
+		strconv.Itoa(major) +
+		`"},"launch":{"path":".xmcl/launch.sh","kind":"generated-server-launcher","arguments":["-jar","server.jar"]}}`
 }
 
 func TestValidateWorkspaceSelectsEveryReviewedToolchain(t *testing.T) {
@@ -60,14 +62,14 @@ func TestValidateWorkspaceRejectsUntrustedDescriptorFields(t *testing.T) {
 	valid := descriptor("1.21.1", "java-runtime-delta", 21, "neoforge", "21.1.115")
 	cases := []string{
 		strings.Replace(valid, `.xmcl/launch.sh`, `../bin/sh`, 1),
-		strings.Replace(valid, `"arguments":[]`, `"arguments":["-Duser=x"]`, 1),
+		strings.Replace(valid, `"arguments":["-jar","server.jar"]`, `"arguments":["-Duser=x"]`, 1),
 		strings.Replace(valid, `"kind":"neoforge"`, `"kind":"vanilla"`, 1),
-		strings.Replace(valid, contentSHA, strings.Repeat("b", 64), 1),
 		strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":2`, 1),
 		strings.Replace(valid, `"major":21`, `"major":25`, 1),
 		strings.Replace(valid, "java-runtime-delta", "unreviewed-component", 1),
 		strings.Replace(valid, reviewedCatalog.SHA256, strings.Repeat("c", 64), 1),
 		strings.Replace(valid, `"version":"21.1.115"`, `"version":"21.1.116"`, 1),
+		strings.Replace(valid, `"jreId":"java-runtime-delta-21"`, `"jreId":"../java"`, 1),
 		descriptor("1.12.2", "jre-legacy", 8, "neoforge", "21.1.115"),
 	}
 	for _, body := range cases {
@@ -76,6 +78,23 @@ func TestValidateWorkspaceRejectsUntrustedDescriptorFields(t *testing.T) {
 		if _, err := ValidateWorkspace(root, contentSHA); err == nil {
 			t.Fatalf("unsafe descriptor was accepted: %s", body)
 		}
+	}
+}
+
+func TestValidateWorkspaceAuthenticatesArchiveHashOutsideDescriptor(t *testing.T) {
+	root := t.TempDir()
+	writeDescriptor(t, root, descriptor(
+		"1.21.1",
+		"java-runtime-delta",
+		21,
+		"neoforge",
+		"21.1.115",
+	))
+	if _, err := ValidateWorkspace(root, contentSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateWorkspace(root, "not-a-sha256"); err == nil {
+		t.Fatal("invalid externally authenticated archive hash was accepted")
 	}
 }
 

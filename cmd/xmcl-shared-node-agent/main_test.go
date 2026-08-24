@@ -36,7 +36,10 @@ func TestDeriveNodeStatusSubtractsManagedCapacity(t *testing.T) {
 		TotalMemoryMiB: 4096, TotalSharedCPU: 8, TotalWorkspaceGiB: 100, IngressHost: "198.51.100.10",
 	}, func(context.Context) ([]agent.RunningService, error) {
 		return []agent.RunningService{{
-			Resources: controlplane.Resources{MemoryMiB: 1024, SharedCPU: 2, WorkspaceGiB: 20},
+			ServiceID: "service-1", AssignmentID: "assignment-1",
+			Resources:      controlplane.Resources{MemoryMiB: 1024, SharedCPU: 2, WorkspaceGiB: 20},
+			CPUPercent:     12.5,
+			MemoryUsageMiB: 768,
 		}}, nil
 	}, "test-agent")
 
@@ -47,6 +50,12 @@ func TestDeriveNodeStatusSubtractsManagedCapacity(t *testing.T) {
 		FreeWorkspaceGiB: 80, AllocatableMemoryMiB: 3072, AllocatableSharedCPU: 6, ActiveContainerCount: 1,
 	}) {
 		t.Fatalf("status = %#v", status)
+	}
+	if len(status.Services) != 1 || status.Services[0] != (controlplane.ServiceStatus{
+		ServiceID: "service-1", AssignmentID: "assignment-1",
+		CPUPercent: 12.5, MemoryUsageMiB: 768, MemoryLimitMiB: 1024,
+	}) {
+		t.Fatalf("service status = %#v", status.Services)
 	}
 }
 

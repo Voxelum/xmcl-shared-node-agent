@@ -15,6 +15,8 @@ type ActiveAssignment struct {
 	// Phase is persisted before Docker starts so a process crash during the
 	// health wait can be resumed rather than treated as an unowned container.
 	Phase string `json:"phase,omitempty"`
+	// StopReported closes billable runtime before potentially slow workspace sync.
+	StopReported bool `json:"stopReported,omitempty"`
 }
 
 type StateStore interface {

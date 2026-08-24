@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -37,6 +38,7 @@ const (
 type Runtime struct {
 	client      *client.Client
 	image       string
+	dockerImage string
 	stopTimeout time.Duration
 	healthWait  time.Duration
 }
@@ -49,14 +51,17 @@ func New(image string, stopTimeout time.Duration) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Docker client: %w", err)
 	}
-	return &Runtime{client: api, image: image, stopTimeout: stopTimeout, healthWait: 2 * time.Minute}, nil
+	return &Runtime{
+		client: api, image: image, dockerImage: image,
+		stopTimeout: stopTimeout, healthWait: 2 * time.Minute,
+	}, nil
 }
 
 func (r *Runtime) Validate(ctx context.Context) error {
 	if _, err := r.client.Ping(ctx); err != nil {
 		return fmt.Errorf("ping Docker daemon: %w", err)
 	}
-	image, _, err := r.client.ImageInspectWithRaw(ctx, r.image)
+	image, _, err := r.client.ImageInspectWithRaw(ctx, r.dockerImage)
 	if err != nil {
 		return fmt.Errorf("inspect configured container image: %w", err)
 	}
@@ -112,11 +117,70 @@ func (r *Runtime) Running(ctx context.Context) ([]agent.RunningService, error) {
 		if err != nil {
 			return nil, fmt.Errorf("managed container %q has invalid capacity labels: %w", summary.ID, err)
 		}
+		cpuPercent, memoryUsageMiB, err := r.containerMetrics(ctx, summary.ID, resources.MemoryMiB)
+		if err != nil {
+			return nil, fmt.Errorf("read managed container %q metrics: %w", summary.ID, err)
+		}
 		running = append(running, agent.RunningService{
 			ServiceID: serviceID, AssignmentID: assignmentID, Resources: resources,
+			CPUPercent: cpuPercent, MemoryUsageMiB: memoryUsageMiB,
 		})
 	}
 	return running, nil
+}
+
+func (r *Runtime) containerMetrics(ctx context.Context, containerID string, memoryLimitMiB int64) (float64, int64, error) {
+	response, err := r.client.ContainerStatsOneShot(ctx, containerID)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer response.Body.Close()
+	var value struct {
+		CPUStats struct {
+			CPUUsage struct {
+				TotalUsage  uint64   `json:"total_usage"`
+				PercpuUsage []uint64 `json:"percpu_usage"`
+			} `json:"cpu_usage"`
+			SystemUsage uint64 `json:"system_cpu_usage"`
+			OnlineCPUs  uint32 `json:"online_cpus"`
+		} `json:"cpu_stats"`
+		PreCPUStats struct {
+			CPUUsage struct {
+				TotalUsage uint64 `json:"total_usage"`
+			} `json:"cpu_usage"`
+			SystemUsage uint64 `json:"system_cpu_usage"`
+		} `json:"precpu_stats"`
+		MemoryStats struct {
+			Usage uint64            `json:"usage"`
+			Stats map[string]uint64 `json:"stats"`
+		} `json:"memory_stats"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&value); err != nil {
+		return 0, 0, err
+	}
+	cpuPercent := 0.0
+	onlineCPUs := value.CPUStats.OnlineCPUs
+	if onlineCPUs == 0 {
+		onlineCPUs = uint32(len(value.CPUStats.CPUUsage.PercpuUsage))
+	}
+	if value.CPUStats.CPUUsage.TotalUsage >= value.PreCPUStats.CPUUsage.TotalUsage &&
+		value.CPUStats.SystemUsage >= value.PreCPUStats.SystemUsage {
+		cpuDelta := value.CPUStats.CPUUsage.TotalUsage - value.PreCPUStats.CPUUsage.TotalUsage
+		systemDelta := value.CPUStats.SystemUsage - value.PreCPUStats.SystemUsage
+		if cpuDelta > 0 && systemDelta > 0 && onlineCPUs > 0 {
+			cpuPercent = float64(cpuDelta) / float64(systemDelta) * float64(onlineCPUs) * 100
+		}
+	}
+	usage := value.MemoryStats.Usage
+	if cache := value.MemoryStats.Stats["inactive_file"]; cache < usage {
+		usage -= cache
+	}
+	const mebibyte = 1024 * 1024
+	memoryUsageMiB := int64((usage + mebibyte - 1) / mebibyte)
+	if memoryUsageMiB > memoryLimitMiB {
+		memoryUsageMiB = memoryLimitMiB
+	}
+	return cpuPercent, memoryUsageMiB, nil
 }
 
 func (r *Runtime) Start(ctx context.Context, command controlplane.Command, workspacePath string) error {
@@ -152,6 +216,7 @@ func (r *Runtime) Start(ctx context.Context, command controlplane.Command, works
 	if err != nil {
 		return err
 	}
+	config.Image = r.dockerImage
 	created, err := r.client.ContainerCreate(ctx, config, hostConfig, nil, nil, name)
 	if err != nil {
 		return fmt.Errorf("create container: %w", err)

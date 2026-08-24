@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -55,9 +56,11 @@ func retryable(err error) error {
 }
 
 type RunningService struct {
-	ServiceID    string
-	AssignmentID string
-	Resources    controlplane.Resources
+	ServiceID      string
+	AssignmentID   string
+	Resources      controlplane.Resources
+	CPUPercent     float64
+	MemoryUsageMiB int64
 }
 
 type RunningServiceProvider interface {
@@ -105,10 +108,29 @@ func (e *Executor) Execute(ctx context.Context, command controlplane.Command) (c
 	if executeErr != nil {
 		return controlplane.CommandResult{}, executeErr
 	}
+	if result.Status == "stopped" && active != nil {
+		if err := e.store.SetActive(command.ServiceID, *active); err != nil {
+			return controlplane.CommandResult{}, err
+		}
+		return result, nil
+	}
 	if err := e.store.Commit(command.CommandID, command.ServiceID, result, active); err != nil {
 		return controlplane.CommandResult{}, err
 	}
 	return result, nil
+}
+
+func (e *Executor) MarkStoppedReported(serviceID, assignmentID string) error {
+	active, exists, err := e.store.Active(serviceID)
+	if err != nil {
+		return err
+	}
+	if !exists || active.AssignmentID != assignmentID ||
+		active.Phase != "stopped" {
+		return errors.New("stopped report does not match active assignment")
+	}
+	active.StopReported = true
+	return e.store.SetActive(serviceID, active)
 }
 
 func (e *Executor) TrackLease(commandID string, lease controlplane.CommandLease) error {
@@ -203,8 +225,17 @@ func (e *Executor) execute(ctx context.Context, command controlplane.Command) (c
 		if !exists || active.AssignmentID != command.AssignmentID {
 			return failed("stop command does not match an active assignment"), activePointer(active, exists), nil
 		}
-		if err := e.runtime.Stop(ctx, command); err != nil {
-			return controlplane.CommandResult{}, &active, retryable(fmt.Errorf("stop container: %w", err))
+		if active.Phase != "stopped" {
+			if err := e.runtime.Stop(ctx, command); err != nil {
+				return controlplane.CommandResult{}, &active, retryable(fmt.Errorf("stop container: %w", err))
+			}
+			return controlplane.CommandResult{Status: "stopped"}, &ActiveAssignment{
+				AssignmentID: command.AssignmentID,
+				Phase:        "stopped",
+			}, nil
+		}
+		if !active.StopReported {
+			return controlplane.CommandResult{Status: "stopped"}, &active, nil
 		}
 		syncResult, err := e.workspace.Sync(ctx, command)
 		if err != nil {

@@ -142,6 +142,11 @@ func deriveNodeStatus(ctx context.Context, cfg config.Config, running func(conte
 		status.Capacity.FreeWorkspaceGiB = subtractCapacity(status.Capacity.FreeWorkspaceGiB, service.Resources.WorkspaceGiB)
 		status.Capacity.AllocatableMemoryMiB = subtractCapacity(status.Capacity.AllocatableMemoryMiB, service.Resources.MemoryMiB)
 		status.Capacity.AllocatableSharedCPU = subtractCapacity(status.Capacity.AllocatableSharedCPU, service.Resources.SharedCPU)
+		status.Services = append(status.Services, controlplane.ServiceStatus{
+			ServiceID: service.ServiceID, AssignmentID: service.AssignmentID,
+			CPUPercent: service.CPUPercent, MemoryUsageMiB: service.MemoryUsageMiB,
+			MemoryLimitMiB: service.Resources.MemoryMiB,
+		})
 	}
 	return status
 }

@@ -59,12 +59,36 @@ func (d *Daemon) Process(ctx context.Context, command controlplane.Command) erro
 	stopRenewal := d.renewLease(executionContext, command.CommandID, &lease, &leaseMu, &leaseLost, cancel)
 	defer stopRenewal()
 
-	result, err := d.Executor.Execute(executionContext, command)
-	if err != nil {
-		if leaseLost.Load() {
-			return ErrLeaseLost
+	var result controlplane.CommandResult
+	for {
+		var err error
+		result, err = d.Executor.Execute(executionContext, command)
+		if err != nil {
+			if leaseLost.Load() {
+				return ErrLeaseLost
+			}
+			return err
 		}
-		return err
+		if result.Status != "stopped" {
+			break
+		}
+		leaseMu.RLock()
+		report := controlplane.StoppedReport{
+			ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
+			CommandID: command.CommandID, Lease: lease,
+		}
+		leaseMu.RUnlock()
+		if err := d.retry(ctx, func() error {
+			return d.Reporter.ReportStopped(ctx, report)
+		}); err != nil {
+			return fmt.Errorf("report stopped: %w", err)
+		}
+		if err := d.Executor.MarkStoppedReported(
+			command.ServiceID,
+			command.AssignmentID,
+		); err != nil {
+			return fmt.Errorf("record stopped report: %w", err)
+		}
 	}
 	if leaseLost.Load() {
 		return ErrLeaseLost

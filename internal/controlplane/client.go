@@ -283,6 +283,32 @@ func (c *Client) ReportStarted(ctx context.Context, serviceID, assignmentID stri
 	return err
 }
 
+func (c *Client) ReportStopped(ctx context.Context, report StoppedReport) error {
+	if report.CommandID == "" || report.Lease.Token == "" ||
+		report.Lease.Generation < 1 {
+		return errors.New("stopped report requires the current command lease")
+	}
+	body, err := json.Marshal(struct {
+		ServiceID       string `json:"serviceId"`
+		CommandID       string `json:"commandId"`
+		LeaseToken      string `json:"leaseToken"`
+		LeaseGeneration int64  `json:"leaseGeneration"`
+	}{
+		ServiceID: report.ServiceID, CommandID: report.CommandID,
+		LeaseToken: report.Lease.Token, LeaseGeneration: report.Lease.Generation,
+	})
+	if err != nil {
+		return fmt.Errorf("encode stopped report: %w", err)
+	}
+	_, err = c.sendNode(
+		ctx,
+		"/v1/internal/shared-nodes/"+c.nodeID+"/assignments/"+
+			report.AssignmentID+"/stopped",
+		body,
+	)
+	return err
+}
+
 func (c *Client) ReportStoppedAndSynced(ctx context.Context, result SyncResult) error {
 	if result.CommandID == "" || result.Lease.Token == "" || result.Lease.Generation < 1 {
 		return errors.New("stopped-and-synced report requires the current command lease")

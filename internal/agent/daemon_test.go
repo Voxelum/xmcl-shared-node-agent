@@ -32,6 +32,9 @@ func (g *daemonGateway) Heartbeat(context.Context, controlplane.NodeStatus) erro
 func (*daemonGateway) ReportStarted(context.Context, string, string, controlplane.Endpoint) error {
 	return nil
 }
+func (*daemonGateway) ReportStopped(context.Context, controlplane.StoppedReport) error {
+	return nil
+}
 func (*daemonGateway) ReportStoppedAndSynced(context.Context, controlplane.SyncResult) error {
 	return nil
 }

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"math"
 	"regexp"
 	"sync"
 )
@@ -95,6 +96,13 @@ type SyncResult struct {
 	Lease        CommandLease `json:"-"`
 }
 
+type StoppedReport struct {
+	ServiceID    string
+	AssignmentID string
+	CommandID    string
+	Lease        CommandLease
+}
+
 // WorkspaceBlob is an immutable compressed archive and its complete allowed
 // extraction mapping. No storage credentials or arbitrary keys are represented.
 type WorkspaceBlob struct {
@@ -159,8 +167,17 @@ type NodeStatus struct {
 	ContractVersion int               `json:"contractVersion"`
 	Status          string            `json:"status"`
 	Capacity        AvailableCapacity `json:"capacity"`
+	Services        []ServiceStatus   `json:"services,omitempty"`
 	AgentVersion    string            `json:"agentVersion"`
 	Ingress         Ingress           `json:"ingress"`
+}
+
+type ServiceStatus struct {
+	ServiceID      string  `json:"serviceId"`
+	AssignmentID   string  `json:"assignmentId"`
+	CPUPercent     float64 `json:"cpuPercent"`
+	MemoryUsageMiB int64   `json:"memoryUsageMiB"`
+	MemoryLimitMiB int64   `json:"memoryLimitMiB"`
 }
 
 type AvailableCapacity struct {
@@ -174,20 +191,38 @@ type Ingress struct {
 	Host string `json:"host"`
 }
 
-const SharedNodeContractVersion = 1
+const SharedNodeContractVersion = 2
 const WorkspaceGrantContractVersion = 2
 
 var ingressHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
 
 func (s NodeStatus) Valid() bool {
-	return s.ContractVersion == SharedNodeContractVersion &&
-		(s.Status == "ready" || s.Status == "draining") &&
-		s.Capacity.FreeWorkspaceGiB >= 0 &&
-		s.Capacity.AllocatableMemoryMiB >= 0 &&
-		s.Capacity.AllocatableSharedCPU >= 0 &&
-		s.Capacity.ActiveContainerCount >= 0 &&
-		s.AgentVersion != "" && len(s.AgentVersion) <= 128 &&
-		validIngressHost(s.Ingress.Host)
+	if s.ContractVersion != SharedNodeContractVersion ||
+		(s.Status != "ready" && s.Status != "draining") ||
+		s.Capacity.FreeWorkspaceGiB < 0 ||
+		s.Capacity.AllocatableMemoryMiB < 0 ||
+		s.Capacity.AllocatableSharedCPU < 0 ||
+		s.Capacity.ActiveContainerCount < 0 ||
+		s.AgentVersion == "" || len(s.AgentVersion) > 128 ||
+		!validIngressHost(s.Ingress.Host) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(s.Services))
+	for _, service := range s.Services {
+		key := service.ServiceID + "\x00" + service.AssignmentID
+		if service.ServiceID == "" || service.AssignmentID == "" ||
+			math.IsNaN(service.CPUPercent) || math.IsInf(service.CPUPercent, 0) ||
+			service.CPUPercent < 0 || service.CPUPercent > 10_000 ||
+			service.MemoryUsageMiB < 0 || service.MemoryLimitMiB < 1 ||
+			service.MemoryUsageMiB > service.MemoryLimitMiB {
+			return false
+		}
+		if _, exists := seen[key]; exists {
+			return false
+		}
+		seen[key] = struct{}{}
+	}
+	return true
 }
 
 func validIngressHost(host string) bool {
@@ -203,6 +238,7 @@ type Reporter interface {
 	Register(ctx context.Context, node NodeCapacity) error
 	Heartbeat(ctx context.Context, status NodeStatus) error
 	ReportStarted(ctx context.Context, serviceID, assignmentID string, endpoint Endpoint) error
+	ReportStopped(ctx context.Context, report StoppedReport) error
 	ReportStoppedAndSynced(ctx context.Context, result SyncResult) error
 }
 
@@ -236,6 +272,9 @@ func (UnconfiguredReporter) Heartbeat(context.Context, NodeStatus) error {
 func (UnconfiguredReporter) ReportStarted(context.Context, string, string, Endpoint) error {
 	return ErrTransportUnconfigured
 }
+func (UnconfiguredReporter) ReportStopped(context.Context, StoppedReport) error {
+	return ErrTransportUnconfigured
+}
 func (UnconfiguredReporter) ReportStoppedAndSynced(context.Context, SyncResult) error {
 	return ErrTransportUnconfigured
 }
@@ -246,6 +285,7 @@ type MemoryGateway struct {
 	mu       sync.Mutex
 	Acks     map[string]CommandResult
 	Started  []StartedReport
+	Stopped  []StoppedReport
 	Synced   []SyncResult
 }
 
@@ -286,6 +326,13 @@ func (g *MemoryGateway) ReportStarted(_ context.Context, serviceID, assignmentID
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.Started = append(g.Started, StartedReport{ServiceID: serviceID, AssignmentID: assignmentID, Endpoint: endpoint})
+	return nil
+}
+
+func (g *MemoryGateway) ReportStopped(_ context.Context, report StoppedReport) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.Stopped = append(g.Stopped, report)
 	return nil
 }
 

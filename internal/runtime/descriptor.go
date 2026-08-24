@@ -23,22 +23,18 @@ var (
 const maxDescriptorBytes int64 = 1 << 20
 
 type Descriptor struct {
-	SchemaVersion    int     `json:"schemaVersion"`
-	MinecraftVersion string  `json:"minecraftVersion"`
-	Java             Java    `json:"java"`
-	RuntimeCatalog   Catalog `json:"runtimeCatalog"`
-	Loader           Loader  `json:"loader"`
-	Launch           Launch  `json:"launch"`
-	ContentSHA256    string  `json:"contentSha256"`
+	SchemaVersion          int    `json:"schemaVersion"`
+	RuntimeCatalogRevision string `json:"runtimeCatalogRevision"`
+	MinecraftVersion       string `json:"minecraftVersion"`
+	Java                   Java   `json:"java"`
+	Loader                 Loader `json:"loader"`
+	Launch                 Launch `json:"launch"`
 }
 
 type Java struct {
 	Component string `json:"component"`
 	Major     int    `json:"major"`
-}
-
-type Catalog struct {
-	SHA256 string `json:"sha256"`
+	JREID     string `json:"jreId"`
 }
 
 type Loader struct {
@@ -60,8 +56,9 @@ func BundledJava(java Java) (string, error) {
 }
 
 // ValidateWorkspace rejects every dynamic launch field. expectedContentSHA is
-// provided by the command-selected immutable blob and binds runtime.json to the
-// archive the agent already hashed while restoring.
+// the independently authenticated archive hash from the control plane. It
+// cannot be embedded in runtime.json because runtime.json is part of that
+// archive; the workspace manager verifies the archive bytes before extraction.
 func ValidateWorkspace(root, expectedContentSHA string) (Descriptor, error) {
 	if expectedContentSHA != "" && !sha256Pattern.MatchString(expectedContentSHA) {
 		return Descriptor{}, errors.New("assigned runtime content hash is invalid")
@@ -103,18 +100,17 @@ func ValidateWorkspace(root, expectedContentSHA string) (Descriptor, error) {
 }
 
 func validate(value Descriptor, expectedContentSHA string) error {
-	if value.SchemaVersion != 1 || !minecraftPattern.MatchString(value.MinecraftVersion) ||
-		!sha256Pattern.MatchString(value.ContentSHA256) {
+	if value.SchemaVersion != 1 || !minecraftPattern.MatchString(value.MinecraftVersion) {
 		return errors.New("runtime descriptor has invalid canonical fields")
 	}
-	if expectedContentSHA != "" && value.ContentSHA256 != expectedContentSHA {
-		return errors.New("runtime descriptor content hash does not match restored content")
-	}
-	if value.RuntimeCatalog.SHA256 != reviewedCatalog.SHA256 {
+	if value.RuntimeCatalogRevision != reviewedCatalog.SHA256 {
 		return errors.New("runtime descriptor catalog revision does not match the reviewed catalog")
 	}
 	if _, err := BundledJava(value.Java); err != nil {
 		return err
+	}
+	if !loaderPattern.MatchString(value.Java.JREID) {
+		return errors.New("runtime descriptor has an invalid JRE identifier")
 	}
 	if !loaderPattern.MatchString(value.Loader.Version) {
 		return errors.New("runtime descriptor has an invalid loader version")
@@ -126,8 +122,14 @@ func validate(value Descriptor, expectedContentSHA string) error {
 		return errors.New("runtime descriptor has unsupported reviewed toolchain")
 	}
 	if value.Launch.Kind != "generated-server-launcher" ||
-		value.Launch.Path != ".xmcl/launch.sh" || len(value.Launch.Arguments) != 0 {
+		value.Launch.Path != ".xmcl/launch.sh" ||
+		len(value.Launch.Arguments) == 0 || len(value.Launch.Arguments) > 128 {
 		return errors.New("runtime descriptor has an untrusted launch request")
+	}
+	for _, argument := range value.Launch.Arguments {
+		if !regexp.MustCompile(`^[A-Za-z0-9_@./:+-]{1,512}$`).MatchString(argument) {
+			return errors.New("runtime descriptor has an unsafe generated launch argument")
+		}
 	}
 	return nil
 }

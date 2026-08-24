@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,31 @@ import (
 	"testing"
 	"time"
 )
+
+func TestNodeStatusRejectsNonFiniteServiceCPU(t *testing.T) {
+	t.Parallel()
+	for name, cpu := range map[string]float64{
+		"nan":      math.NaN(),
+		"positive": math.Inf(1),
+		"negative": math.Inf(-1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			status := NodeStatus{
+				ContractVersion: SharedNodeContractVersion,
+				Status:          "ready",
+				AgentVersion:    "test-agent",
+				Ingress:         Ingress{Host: "node.example"},
+				Services: []ServiceStatus{{
+					ServiceID: "service-1", AssignmentID: "assignment-1",
+					CPUPercent: cpu, MemoryUsageMiB: 1, MemoryLimitMiB: 2,
+				}},
+			}
+			if status.Valid() {
+				t.Fatalf("CPU percentage %v was accepted", cpu)
+			}
+		})
+	}
+}
 
 func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	t.Parallel()
@@ -76,7 +102,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 		case "/v1/internal/shared-nodes/register":
 			_, _ = w.Write([]byte(`{"nodeId":"node-1","credential":"node-1.initial-secret","expiresAt":"2026-01-01T00:00:00Z"}`))
 		case "/v1/internal/shared-nodes/node-1/heartbeat":
-			if string(body) != `{"contractVersion":1,"status":"ready","capacity":{"freeWorkspaceGiB":8,"allocatableMemoryMiB":1536,"allocatableSharedCpu":1,"activeContainerCount":1},"agentVersion":"test-agent","ingress":{"host":"public-node.example"}}` {
+			if string(body) != `{"contractVersion":2,"status":"ready","capacity":{"freeWorkspaceGiB":8,"allocatableMemoryMiB":1536,"allocatableSharedCpu":1,"activeContainerCount":1},"agentVersion":"test-agent","ingress":{"host":"public-node.example"}}` {
 				t.Fatalf("heartbeat body = %s", body)
 			}
 			_, _ = w.Write([]byte(`{"ok":true}`))
@@ -95,6 +121,11 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 		case "/v1/internal/shared-nodes/node-1/assignments/assignment-1/started":
 			if string(body) != `{"serviceId":"service-1","endpoint":{"host":"public-node.example","port":25572}}` {
 				t.Fatalf("started body = %s", body)
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/v1/internal/shared-nodes/node-1/assignments/assignment-1/stopped":
+			if string(body) != `{"serviceId":"service-1","commandId":"command-1","leaseToken":"lease-token","leaseGeneration":7}` {
+				t.Fatalf("stopped body = %s", body)
 			}
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/v1/internal/shared-nodes/node-1/assignments/assignment-1/stopped-synced":
@@ -163,6 +194,12 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	if err := client.ReportStarted(ctx, command.ServiceID, command.AssignmentID, command.Connection.Endpoint()); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.ReportStopped(ctx, StoppedReport{
+		ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
+		CommandID: command.CommandID, Lease: renewed,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := client.ReportStoppedAndSynced(ctx, SyncResult{
 		ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
 		CommandID: command.CommandID, Lease: renewed,
@@ -170,8 +207,8 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 7 {
-		t.Fatalf("requests = %d, want 7", requests)
+	if requests != 8 {
+		t.Fatalf("requests = %d, want 8", requests)
 	}
 	persisted, err := os.ReadFile(credentialPath)
 	if err != nil {

@@ -164,6 +164,12 @@ func TestFailedSyncRetainsActiveAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	stop := testCommand(controlplane.StopAndSync, "stop_1", "node_1", "assignment_1")
+	if result, err := executor.Execute(context.Background(), stop); err != nil || result.Status != "stopped" {
+		t.Fatalf("stop phase = %#v, %v", result, err)
+	}
+	if err := executor.MarkStoppedReported(stop.ServiceID, stop.AssignmentID); err != nil {
+		t.Fatal(err)
+	}
 	_, err = executor.Execute(context.Background(), stop)
 	var retry *RetryableError
 	if !errors.As(err, &retry) {
@@ -192,7 +198,14 @@ func TestSuccessfulStopReleasesServiceForAnotherNode(t *testing.T) {
 	if _, err := first.Execute(context.Background(), testCommand(controlplane.RestoreAndStart, "start_1", "node_1", "assignment_1")); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := first.Execute(context.Background(), testCommand(controlplane.StopAndSync, "stop_1", "node_1", "assignment_1")); err != nil || result.Status != "stopped-and-synced" {
+	stop := testCommand(controlplane.StopAndSync, "stop_1", "node_1", "assignment_1")
+	if result, err := first.Execute(context.Background(), stop); err != nil || result.Status != "stopped" {
+		t.Fatalf("stop phase = %#v, %v", result, err)
+	}
+	if err := first.MarkStoppedReported(stop.ServiceID, stop.AssignmentID); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := first.Execute(context.Background(), stop); err != nil || result.Status != "stopped-and-synced" {
 		t.Fatalf("stop = %#v, %v", result, err)
 	}
 	reopened, err := NewFileStore(root)
