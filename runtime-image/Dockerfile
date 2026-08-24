@@ -1,7 +1,7 @@
 # This image is intentionally built only by the verified release workflow.
 # runtime-assets/ is an ignored, checksum-validated build input containing
 # the support assets and the Java directories materialized from the catalog lock.
-FROM gcr.io/distroless/base-debian12@sha256:19daaf0b09ea006981869d1b02664f455627868252d4547724d126de2a765e08
+FROM gcr.io/distroless/base-debian12@sha256:d2add786f2a5f43d1ab3ae54cd3193de929d0d12c378ff60891921f56f3e47ff
 
 ARG RUNTIME_CATALOG_SHA256
 LABEL io.xmcl.runtime-catalog-sha256="${RUNTIME_CATALOG_SHA256}"

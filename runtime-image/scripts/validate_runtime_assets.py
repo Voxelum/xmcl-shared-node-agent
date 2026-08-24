@@ -16,7 +16,7 @@ REQUIRED = {"busybox"}
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 PINNED_BASE = (
     "FROM gcr.io/distroless/base-debian12@"
-    "sha256:19daaf0b09ea006981869d1b02664f455627868252d4547724d126de2a765e08"
+    "sha256:d2add786f2a5f43d1ab3ae54cd3193de929d0d12c378ff60891921f56f3e47ff"
 )
 
 
