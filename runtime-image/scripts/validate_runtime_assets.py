@@ -15,8 +15,8 @@ LOCK = ROOT / "runtime-assets.lock.json"
 REQUIRED = {"busybox"}
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 PINNED_BASE = (
-    "FROM gcr.io/distroless/base-debian12@"
-    "sha256:d2add786f2a5f43d1ab3ae54cd3193de929d0d12c378ff60891921f56f3e47ff"
+    "FROM gcr.io/distroless/java-base-debian12@"
+    "sha256:e5ceff75002cf4f0b5f99e0a1b614757f8e913103dac26015684024f635f7674"
 )
 
 
