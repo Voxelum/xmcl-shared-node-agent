@@ -11,6 +11,10 @@ for command in docker go java ldd mkfs.xfs xfs_quota sudo; do
     exit 1
   }
 done
+if ! java --list-modules | grep -q '^jdk.compiler@'; then
+  echo "the WSL Java runtime must provide the jdk.compiler module" >&2
+  exit 1
+fi
 
 repository="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 state_root="${XMCL_MOCK_LIGHTNODE_STATE_ROOT:-/var/lib/xmcl-mock-lightnode}"

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -133,6 +134,23 @@ func digest(data []byte) string {
 
 func compilerContent(t *testing.T) ([]byte, []string, int64) {
 	t.Helper()
+	source := []byte("import java.net.ServerSocket; public class MockServer { public static void main(String[] args) throws Exception { try (ServerSocket server = new ServerSocket(25565)) { while (true) { server.accept().close(); } } } }\n")
+	compileRoot := t.TempDir()
+	sourcePath := filepath.Join(compileRoot, "MockServer.java")
+	if err := os.WriteFile(sourcePath, source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compile := exec.Command(
+		"java", "-m", "jdk.compiler/com.sun.tools.javac.Main", "MockServer.java",
+	)
+	compile.Dir = compileRoot
+	if output, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("compile mock Minecraft server: %v: %s", err, output)
+	}
+	mockServer, err := os.ReadFile(filepath.Join(compileRoot, "MockServer.class"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	descriptor := map[string]any{
 		"schemaVersion":          1,
 		"runtimeCatalogRevision": runtimecontract.CatalogSHA256(),
@@ -146,7 +164,7 @@ func compilerContent(t *testing.T) ([]byte, []string, int64) {
 		},
 		"launch": map[string]any{
 			"path": ".xmcl/launch.sh", "kind": "generated-server-launcher",
-			"arguments": []string{"MockServer.java"},
+			"arguments": []string{"MockServer"},
 		},
 	}
 	runtimeJSON, err := json.Marshal(descriptor)
@@ -164,11 +182,11 @@ func compilerContent(t *testing.T) ([]byte, []string, int64) {
 		},
 		{
 			name: ".xmcl/launch.sh", mode: 0o755,
-			data: []byte("#!/bin/sh\nset -eu\n: \"${XMCL_JAVA:?XMCL_JAVA is required}\"\nexec \"$XMCL_JAVA\" MockServer.java\n"),
+			data: []byte("#!/bin/sh\nset -eu\n: \"${XMCL_JAVA:?XMCL_JAVA is required}\"\nexec \"$XMCL_JAVA\" MockServer\n"),
 		},
 		{
-			name: "MockServer.java", mode: 0o644,
-			data: []byte("import java.net.ServerSocket; public class MockServer { public static void main(String[] args) throws Exception { try (ServerSocket server = new ServerSocket(25565)) { while (true) { server.accept().close(); } } } }\n"),
+			name: "MockServer.class", mode: 0o644,
+			data: mockServer,
 		},
 	}
 	var tarBytes bytes.Buffer

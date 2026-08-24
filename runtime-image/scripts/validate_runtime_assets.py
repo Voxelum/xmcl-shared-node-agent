@@ -14,6 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCK = ROOT / "runtime-assets.lock.json"
 REQUIRED = {"busybox"}
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
+PINNED_BASE = (
+    "FROM gcr.io/distroless/base-debian12@"
+    "sha256:19daaf0b09ea006981869d1b02664f455627868252d4547724d126de2a765e08"
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -32,6 +36,9 @@ def main() -> int:
     lock = json.loads(LOCK.read_text(encoding="utf-8"))
     if lock.get("schemaVersion") != 2 or set(lock.get("assets", {})) != REQUIRED:
         raise ValueError("runtime asset lock has an invalid schema or asset set")
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    if PINNED_BASE not in dockerfile:
+        raise ValueError("runtime image base is not the reviewed immutable digest")
 
     for name, value in lock["assets"].items():
         if not isinstance(value.get("source"), str) or not value["source"]:

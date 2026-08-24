@@ -73,6 +73,15 @@ jobs:
           python3 runtime-image/scripts/materialize_runtime_catalog.py
           python3 runtime-image/scripts/validate_runtime_assets.py --require-files
           python3 runtime-image/scripts/validate_runtime_catalog.py --require-files
+      - name: Validate every Java runtime in the final image base
+        run: |
+          catalog_sha=$(sha256sum runtime-image/runtime-catalog.lock.json | cut -d' ' -f1)
+          docker build --build-arg "RUNTIME_CATALOG_SHA256=$catalog_sha" \
+            --tag xmcl-runtime-validation runtime-image
+          for major in 8 16 17 21 25; do
+            docker run --rm --entrypoint "/opt/xmcl/jre/$major/bin/java" \
+              xmcl-runtime-validation -version
+          done
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
