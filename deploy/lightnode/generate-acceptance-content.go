@@ -8,17 +8,22 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
 	runtimecontract "github.com/voxelum/xmcl-shared-node-agent/internal/runtime"
 )
 
-const contentKey = "shared-hosting/acceptance-account/acceptance-service/compiler-content/acceptance.tar.zst"
+const (
+	contentKey = "shared-hosting/acceptance-account/acceptance-service/compiler-content/vanilla-1.21.1.tar.zst"
+	serverURL  = "https://piston-data.mojang.com/v1/objects/59353fb40c36d304f2035d51e7d6e6baa98dc05c/server.jar"
+	serverSHA  = "e3bc55693e93cda0188f2e60aea28113fc647c5e85a15fa3d1b347349231b4bb"
+	serverSize = 51627615
+)
 
 type contentFile struct {
 	name string
@@ -30,25 +35,7 @@ func main() {
 	if len(os.Args) != 3 {
 		panic("usage: go run generate-acceptance-content.go <archive> <metadata>")
 	}
-	temporary, err := os.MkdirTemp("", "xmcl-acceptance-content-")
-	if err != nil {
-		panic(err)
-	}
-	defer os.RemoveAll(temporary)
-
-	source := []byte("import java.net.ServerSocket; public class MockServer { public static void main(String[] args) throws Exception { try (ServerSocket server = new ServerSocket(25565)) { while (true) { server.accept().close(); } } } }\n")
-	if err := os.WriteFile(filepath.Join(temporary, "MockServer.java"), source, 0o600); err != nil {
-		panic(err)
-	}
-	compile := exec.Command("java", "-m", "jdk.compiler/com.sun.tools.javac.Main", "MockServer.java")
-	compile.Dir = temporary
-	if output, err := compile.CombinedOutput(); err != nil {
-		panic(errors.New(err.Error() + ": " + string(output)))
-	}
-	class, err := os.ReadFile(filepath.Join(temporary, "MockServer.class"))
-	if err != nil {
-		panic(err)
-	}
+	server := downloadServer()
 	runtimeJSON, err := json.Marshal(map[string]any{
 		"schemaVersion":          1,
 		"runtimeCatalogRevision": runtimecontract.CatalogSHA256(),
@@ -62,7 +49,7 @@ func main() {
 		},
 		"launch": map[string]any{
 			"path": ".xmcl/launch.sh", "kind": "generated-server-launcher",
-			"arguments": []string{"MockServer"},
+			"arguments": []string{"-jar", "server.jar", "nogui"},
 		},
 	})
 	if err != nil {
@@ -73,9 +60,15 @@ func main() {
 		{
 			name: ".xmcl/launch.sh",
 			mode: 0o755,
-			data: []byte("#!/bin/sh\nset -eu\n: \"${XMCL_JAVA:?XMCL_JAVA is required}\"\nexec \"$XMCL_JAVA\" MockServer\n"),
+			data: []byte("#!/bin/sh\nset -eu\n: \"${XMCL_JAVA:?XMCL_JAVA is required}\"\nexec \"$XMCL_JAVA\" -Xms256M -Xmx768M -jar server.jar nogui\n"),
 		},
-		{name: "MockServer.class", mode: 0o644, data: class},
+		{name: "eula.txt", mode: 0o644, data: []byte("eula=true\n")},
+		{
+			name: "server.properties",
+			mode: 0o644,
+			data: []byte("motd=XMCL Together acceptance\nonline-mode=false\nview-distance=2\nsimulation-distance=2\nmax-players=2\nsync-chunk-writes=false\n"),
+		},
+		{name: "server.jar", mode: 0o644, data: server},
 	}
 	var archive bytes.Buffer
 	tarWriter := tar.NewWriter(&archive)
@@ -125,4 +118,30 @@ func main() {
 	if err := os.WriteFile(os.Args[2], append(metadata, '\n'), 0o600); err != nil {
 		panic(err)
 	}
+}
+
+func downloadServer() []byte {
+	client := &http.Client{
+		Timeout: 2 * time.Minute,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return fmt.Errorf("server download redirect rejected")
+		},
+	}
+	response, err := client.Get(serverURL)
+	if err != nil {
+		panic(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.ContentLength != serverSize {
+		panic(fmt.Errorf("unexpected server response: status=%d size=%d", response.StatusCode, response.ContentLength))
+	}
+	server, err := io.ReadAll(io.LimitReader(response.Body, serverSize+1))
+	if err != nil {
+		panic(err)
+	}
+	sum := sha256.Sum256(server)
+	if len(server) != serverSize || hex.EncodeToString(sum[:]) != serverSHA {
+		panic("server artifact integrity check failed")
+	}
+	return server
 }
