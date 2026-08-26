@@ -53,6 +53,7 @@ func main() {
 	controlPlane, err := controlplane.NewClient(controlplane.ClientOptions{
 		BaseURL:             cfg.ControlPlaneURL,
 		NodeID:              cfg.NodeID,
+		InstanceID:          cfg.InstanceID,
 		Region:              cfg.Region,
 		BootstrapCredential: cfg.ControlPlaneCredential,
 		CredentialPath:      filepath.Join(cfg.StateRoot, "control-plane-credential"),

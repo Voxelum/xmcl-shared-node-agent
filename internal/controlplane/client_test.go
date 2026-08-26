@@ -68,7 +68,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 			if auth != "SharedNode-Bootstrap "+bootstrap {
 				t.Fatalf("register authorization = %q", auth)
 			}
-			if string(body) != `{"nodeId":"node-1","region":"sgp","totalMemoryMiB":2048,"totalSharedCpu":2,"totalWorkspaceGiB":10}` {
+			if string(body) != `{"nodeId":"node-1","instanceId":"instance-1","region":"sgp","totalMemoryMiB":2048,"totalSharedCpu":2,"totalWorkspaceGiB":10}` {
 				t.Fatalf("register body = %s", body)
 			}
 		} else if auth != "SharedNode "+activeCredential {
@@ -143,6 +143,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	client, err := NewClient(ClientOptions{
 		BaseURL:             server.URL,
 		NodeID:              nodeID,
+		InstanceID:          "instance-1",
 		Region:              "sgp",
 		BootstrapCredential: bootstrap,
 		CredentialPath:      credentialPath,
@@ -273,6 +274,7 @@ func TestClientRotatesPersistedCredentialBeforeExpiry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credential")
 	client, err := NewClient(ClientOptions{
 		BaseURL: server.URL, NodeID: "node-1", Region: "sgp",
+		InstanceID:          "instance-1",
 		BootstrapCredential: "bootstrap", CredentialPath: path, HTTPClient: server.Client(),
 		Now: func() time.Time { return now }, Nonce: func() (string, error) { return "nonce", nil },
 	})

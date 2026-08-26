@@ -27,6 +27,7 @@ const maxControlPlaneResponseBytes = 1 << 20
 type Client struct {
 	baseURL             *url.URL
 	nodeID              string
+	instanceID          string
 	region              string
 	bootstrapCredential string
 	credentialPath      string
@@ -43,6 +44,7 @@ type Client struct {
 type ClientOptions struct {
 	BaseURL             string
 	NodeID              string
+	InstanceID          string
 	Region              string
 	BootstrapCredential string
 	CredentialPath      string
@@ -85,6 +87,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 	client := &Client{
 		baseURL:             baseURL,
 		nodeID:              options.NodeID,
+		instanceID:          options.InstanceID,
 		region:              options.Region,
 		bootstrapCredential: options.BootstrapCredential,
 		credentialPath:      options.CredentialPath,
@@ -121,14 +124,18 @@ func (c *Client) Register(ctx context.Context, capacity NodeCapacity) error {
 	if c.bootstrapCredential == "" {
 		return errors.New("control-plane bootstrap credential is unavailable")
 	}
+	if c.instanceID == "" {
+		return errors.New("control-plane instance ID is required for registration")
+	}
 	body, err := json.Marshal(struct {
 		NodeID            string `json:"nodeId"`
+		InstanceID        string `json:"instanceId"`
 		Region            string `json:"region"`
 		TotalMemoryMiB    int64  `json:"totalMemoryMiB"`
 		TotalSharedCPU    int64  `json:"totalSharedCpu"`
 		TotalWorkspaceGiB int64  `json:"totalWorkspaceGiB"`
 	}{
-		NodeID: c.nodeID, Region: c.region, TotalMemoryMiB: capacity.TotalMemoryMiB,
+		NodeID: c.nodeID, InstanceID: c.instanceID, Region: c.region, TotalMemoryMiB: capacity.TotalMemoryMiB,
 		TotalSharedCPU: capacity.TotalSharedCPU, TotalWorkspaceGiB: capacity.TotalWorkspaceGiB,
 	})
 	if err != nil {

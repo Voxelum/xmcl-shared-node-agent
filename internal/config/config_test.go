@@ -183,6 +183,7 @@ func setCanonicalEnvironment(t *testing.T) {
 	t.Helper()
 	for name, value := range map[string]string{
 		"XMCL_SHARED_NODE_ID":                      "node_1",
+		"XMCL_SHARED_NODE_INSTANCE_ID":             "instance_1",
 		"XMCL_SHARED_NODE_REGION":                  "sgp",
 		"XMCL_CONTROL_PLANE_URL":                   "https://control.example.test",
 		"XMCL_CONTROL_PLANE_CREDENTIAL":            "bootstrap",

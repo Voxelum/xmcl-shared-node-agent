@@ -16,6 +16,7 @@ import (
 
 type Config struct {
 	NodeID                 string
+	InstanceID             string
 	Region                 string
 	ControlPlaneURL        string
 	ControlPlaneCredential string
@@ -68,6 +69,7 @@ func Load() (Config, error) {
 		target *string
 	}{
 		{"XMCL_SHARED_NODE_ID", &c.NodeID},
+		{"XMCL_SHARED_NODE_INSTANCE_ID", &c.InstanceID},
 		{"XMCL_SHARED_NODE_REGION", &c.Region},
 		{"XMCL_CONTROL_PLANE_URL", &c.ControlPlaneURL},
 		{"XMCL_SHARED_NODE_INGRESS_HOST", &c.IngressHost},
