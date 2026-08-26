@@ -1,0 +1,23 @@
+[Unit]
+Description=XMCL LightNode bootstrap runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xmcl-lightnode-runner
+Group=xmcl-lightnode-runner
+EnvironmentFile=/etc/xmcl-lightnode-bootstrap-runner.env
+ExecStart=/usr/local/bin/xmcl-lightnode-bootstrap-runner
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/xmcl-lightnode-runner
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

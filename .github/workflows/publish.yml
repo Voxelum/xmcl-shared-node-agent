@@ -66,6 +66,26 @@ jobs:
           go build -trimpath -ldflags "-s -w" \
             -o dist/xmcl-shared-minecraft-runtime-linux-amd64 \
             ./cmd/xmcl-shared-minecraft-runtime
+          go build -trimpath -ldflags "-s -w" \
+            -o dist/xmcl-lightnode-bootstrap-runner-linux-amd64 \
+            ./cmd/xmcl-lightnode-bootstrap-runner
+          bash -n deploy/lightnode/bootstrap.sh deploy/lightnode/runner.sh
+          mkdir -p dist/lightnode-runner
+          cp dist/xmcl-lightnode-bootstrap-runner-linux-amd64 \
+            dist/lightnode-runner/xmcl-lightnode-bootstrap-runner
+          cp deploy/lightnode/bootstrap.sh deploy/lightnode/runner.sh \
+            deploy/lightnode/runner.env.example \
+            deploy/lightnode/nginx-runner.conf.example \
+            deploy/systemd/xmcl-shared-node-agent.service \
+            deploy/systemd/xmcl-lightnode-bootstrap-runner.service \
+            dist/lightnode-runner/
+          tar -C dist/lightnode-runner -czf \
+            dist/xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz .
+          mkdir -p dist/lightnode-runner-verify
+          tar -C dist/lightnode-runner-verify -xzf \
+            dist/xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz
+          bash -n dist/lightnode-runner-verify/bootstrap.sh \
+            dist/lightnode-runner-verify/runner.sh
       - name: Materialize and verify runtime image inputs
         run: |
           python3 runtime-image/scripts/materialize_runtime_assets.py \
@@ -175,6 +195,7 @@ jobs:
             xmcl-shared-node-agent-linux-amd64 \
             xmcl-quota-helper-linux-amd64 \
             xmcl-shared-minecraft-runtime-linux-amd64 \
+            xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz \
             release-manifest.json > SHA256SUMS)
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
@@ -182,6 +203,7 @@ jobs:
             dist/xmcl-shared-node-agent-linux-amd64
             dist/xmcl-quota-helper-linux-amd64
             dist/xmcl-shared-minecraft-runtime-linux-amd64
+            dist/xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz
             dist/release-manifest.json
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
@@ -200,5 +222,6 @@ jobs:
             dist/xmcl-shared-node-agent-linux-amd64 \
             dist/xmcl-quota-helper-linux-amd64 \
             dist/xmcl-shared-minecraft-runtime-linux-amd64 \
+            dist/xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz \
             dist/release-manifest.json \
             dist/SHA256SUMS

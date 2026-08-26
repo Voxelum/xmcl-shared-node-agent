@@ -114,6 +114,9 @@ func (d *Daemon) Process(ctx context.Context, command controlplane.Command) erro
 		}); err != nil {
 			return fmt.Errorf("report stopped and synced: %w", err)
 		}
+		if err := d.Executor.Release(ctx, command); err != nil {
+			return fmt.Errorf("release durably synced local workspace: %w", err)
+		}
 	}
 	if leaseLost.Load() {
 		return ErrLeaseLost
@@ -125,11 +128,6 @@ func (d *Daemon) Process(ctx context.Context, command controlplane.Command) erro
 		return d.Source.Ack(ctx, command.CommandID, acknowledgementLease, result)
 	}); err != nil {
 		return fmt.Errorf("ack command: %w", err)
-	}
-	if result.Status == "stopped-and-synced" {
-		if err := d.Executor.Release(ctx, command); err != nil {
-			return fmt.Errorf("release acknowledged local workspace: %w", err)
-		}
 	}
 	if err := d.Executor.ClearLease(command.CommandID); err != nil {
 		return fmt.Errorf("clear command lease: %w", err)

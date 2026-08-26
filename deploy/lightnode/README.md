@@ -33,21 +33,42 @@ export XMCL_LIGHTNODE_AGENT_SERVICE=deploy/systemd/xmcl-shared-node-agent.servic
 deploy/lightnode/runner.sh apply
 ```
 
+`xmcl-lightnode-bootstrap-runner` exposes this flow to the control plane
+without auto-approving trust on first use. `POST /v1/bootstrap-jobs` persists
+the exact request and performs only `probe`; it returns
+`awaiting_host_key_approval`. An operator reads the fingerprint from
+`POST /v1/bootstrap-jobs/<jobId>/status`, compares its node, instance, address,
+instance name, package, region, zone, image, firewall, and SSH key fields with
+the LightNode control plane, and approves that exact fingerprint through
+`POST /v1/bootstrap-jobs/<jobId>/approve` using the separate approval secret.
+The next control-plane retry performs `apply`. Changed payloads for an existing
+job are rejected, and completed jobs return success without another SSH
+connection. Deploy it with
+`deploy/systemd/xmcl-lightnode-bootstrap-runner.service` and the settings
+documented in `runner.env.example`; terminate public TLS in front of its
+loopback listener. `nginx-runner.conf.example` exposes only the exact
+control-plane bootstrap endpoint publicly. It restricts status and approval to
+loopback, so operators must invoke them on the runner host or through an
+authenticated SSH/VPN tunnel. Replace the example hostname and certificate
+paths before enabling the site.
+
 The uploaded bootstrap environment pins one `XMCL_RELEASE_MANIFEST_URL` and its
 exact `XMCL_RELEASE_MANIFEST_SHA256`. The manifest supplies the only accepted
 agent hash, quota-helper hash, runtime image digest, and raw runtime-catalog
 hash. Bootstrap derives artifact URLs from the manifest's immutable GitHub
 release tag and rejects an image whose embedded catalog label differs.
 
-The runner must pin and verify the expected LightNode instance id, public IPv4,
-image id, region, zone, package resources, and the persisted SSH host key before
-the `apply` job is eligible. TCP 22 must be limited to the runner's stable
-egress address. A successful script exit means the one-time enrollment was
-consumed, the agent persisted its rotating credential, and the control plane
-accepted its first heartbeat. The runner must then remove TCP 22 from the
-provider firewall and report bootstrap completion. A timeout or disconnect
-remains quarantined and must be reconciled against the same instance and node
-id.
+The control plane validates the provider response and sends the expected
+LightNode instance id, public IPv4, name, image, region, zone, package,
+firewall, and SSH key identifiers in the immutable runner job. The operator
+compares those persisted fields with LightNode together with the probed host
+key before approval makes `apply` eligible. TCP 22 must be limited to the
+runner's stable egress address. A successful script exit means the one-time
+enrollment was consumed, the agent persisted its rotating credential, and the
+control plane accepted its first heartbeat. Deployment automation or an
+operator must then remove TCP 22 from the provider firewall. A timeout or
+disconnect remains quarantined and must be reconciled against the same
+instance and node id.
 
 The bootstrap creates a fixed-size XFS loopback filesystem with project quotas
 on the system disk. This avoids guessing a LightNode block-device name or

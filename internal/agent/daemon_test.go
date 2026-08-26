@@ -143,6 +143,74 @@ type leaseSource struct {
 	acks atomic.Int32
 }
 
+type interruptedAckGateway struct {
+	daemonGateway
+	cancel         context.CancelFunc
+	acks           atomic.Int32
+	syncReports    atomic.Int32
+	stoppedReports atomic.Int32
+}
+
+func (g *interruptedAckGateway) Ack(context.Context, string, controlplane.CommandLease, controlplane.CommandResult) error {
+	g.acks.Add(1)
+	if g.cancel != nil {
+		g.cancel()
+		return context.Canceled
+	}
+	return nil
+}
+
+func (g *interruptedAckGateway) ReportStopped(context.Context, controlplane.StoppedReport) error {
+	g.stoppedReports.Add(1)
+	return nil
+}
+
+func (g *interruptedAckGateway) ReportStoppedAndSynced(context.Context, controlplane.SyncResult) error {
+	g.syncReports.Add(1)
+	return nil
+}
+
+func TestStopSyncReleasesBeforeAckAndRecoversAfterInterruption(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, runtime := &fakeWorkspace{}, &fakeRuntime{}
+	executor := NewExecutor("node_1", store, workspace, runtime)
+	if _, err := executor.Execute(context.Background(), testCommand(controlplane.RestoreAndStart, "start_1", "node_1", "assignment_1")); err != nil {
+		t.Fatal(err)
+	}
+	command := testCommand(controlplane.StopAndSync, "stop_1", "node_1", "assignment_1")
+	ctx, cancel := context.WithCancel(context.Background())
+	gateway := &interruptedAckGateway{
+		daemonGateway: daemonGateway{heartbeats: make(chan struct{}, 1)},
+		cancel:        cancel,
+	}
+	daemon := Daemon{NodeID: "node_1", Source: gateway, Reporter: gateway, Executor: executor}
+	if err := daemon.Process(ctx, command); !errors.Is(err, context.Canceled) {
+		t.Fatalf("process error = %v, want interrupted acknowledgement", err)
+	}
+	if workspace.releases != 1 || gateway.acks.Load() != 1 {
+		t.Fatalf("release/ack calls = %d/%d, want 1/1", workspace.releases, gateway.acks.Load())
+	}
+
+	gateway.cancel = nil
+	if err := daemon.Process(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	if workspace.syncs != 1 {
+		t.Fatalf("workspace syncs = %d, want cached result without another sync", workspace.syncs)
+	}
+	if workspace.releases != 2 || gateway.syncReports.Load() != 2 || gateway.acks.Load() != 2 {
+		t.Fatalf(
+			"release/report/ack calls = %d/%d/%d, want idempotent replay 2/2/2",
+			workspace.releases,
+			gateway.syncReports.Load(),
+			gateway.acks.Load(),
+		)
+	}
+}
+
 func (s *leaseSource) Ack(context.Context, string, controlplane.CommandLease, controlplane.CommandResult) error {
 	s.acks.Add(1)
 	return nil
