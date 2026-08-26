@@ -79,6 +79,8 @@ jobs:
             deploy/systemd/xmcl-shared-node-agent.service \
             deploy/systemd/xmcl-lightnode-bootstrap-runner.service \
             dist/lightnode-runner/
+          chmod 0755 dist/lightnode-runner/bootstrap.sh \
+            dist/lightnode-runner/runner.sh
           tar -C dist/lightnode-runner -czf \
             dist/xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz .
           mkdir -p dist/lightnode-runner-verify
@@ -86,6 +88,8 @@ jobs:
             dist/xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz
           bash -n dist/lightnode-runner-verify/bootstrap.sh \
             dist/lightnode-runner-verify/runner.sh
+          test -x dist/lightnode-runner-verify/bootstrap.sh
+          test -x dist/lightnode-runner-verify/runner.sh
       - name: Materialize and verify runtime image inputs
         run: |
           python3 runtime-image/scripts/materialize_runtime_assets.py \
