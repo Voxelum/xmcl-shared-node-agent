@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly release_url="https://github.com/Voxelum/xmcl-shared-node-agent/releases/download/v0.3.3"
+readonly release_url="https://github.com/Voxelum/xmcl-shared-node-agent/releases/download/v0.3.4"
 readonly bundle_name="xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz"
-readonly bundle_sha256="83fb8fff3d3946f8e41a137bf8b243727732661cd73a3ea2b753d2b1a5e44692"
+readonly bundle_sha256="6b5c8b3e24d3af5b5ed544cfb42b3460fa00acfa30ab42587ab02de7786cf168"
 readonly state_root="/var/lib/xmcl-lightnode-runner"
 readonly install_root="/opt/xmcl-lightnode-runner"
 
