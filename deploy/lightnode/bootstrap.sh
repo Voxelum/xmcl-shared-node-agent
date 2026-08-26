@@ -68,12 +68,13 @@ if [[ -n ${OTEL_EXPORTER_OTLP_ENDPOINT:-} ]]; then
   [[ "$OTEL_EXPORTER_OTLP_ENDPOINT" =~ ^https://[^/?#]+(/[^?#]*)?$ ||
     "$OTEL_EXPORTER_OTLP_ENDPOINT" =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/[^?#]*)?$ ]] ||
     fail "OTEL_EXPORTER_OTLP_ENDPOINT must use HTTPS or loopback HTTP"
-  [[ ${#OTEL_EXPORTER_OTLP_HEADERS:-} -le 4096 &&
-    "${OTEL_EXPORTER_OTLP_HEADERS:-}" != *$'\n'* &&
-    "${OTEL_EXPORTER_OTLP_HEADERS:-}" != *$'\r'* ]] ||
+  otlp_headers_value=${OTEL_EXPORTER_OTLP_HEADERS:-}
+  [[ ${#otlp_headers_value} -le 4096 &&
+    "$otlp_headers_value" != *$'\n'* &&
+    "$otlp_headers_value" != *$'\r'* ]] ||
     fail "OTEL_EXPORTER_OTLP_HEADERS is invalid"
-  if [[ -n ${OTEL_EXPORTER_OTLP_HEADERS:-} ]]; then
-    IFS=',' read -r -a otlp_headers <<<"$OTEL_EXPORTER_OTLP_HEADERS"
+  if [[ -n $otlp_headers_value ]]; then
+    IFS=',' read -r -a otlp_headers <<<"$otlp_headers_value"
     for header in "${otlp_headers[@]}"; do
       [[ "$header" =~ ^[A-Za-z0-9._~-]+=[A-Za-z0-9%._~:/+=-]*$ ]] ||
         fail "OTEL_EXPORTER_OTLP_HEADERS is invalid"
