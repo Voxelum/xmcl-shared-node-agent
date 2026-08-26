@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +57,8 @@ func validRequest() Request {
 			ObjectStorageEndpoint: "https://objects.example.com",
 			ObjectStorageRegion:   "mow",
 			ObjectStorageBucket:   "xmcl-shared",
+			OTLPEndpoint:          "https://otel.example.com",
+			OTLPHeaders:           "authorization=node-scoped-value",
 			WorkspaceVolumeGiB:    40,
 			BootstrapTimeout:      600,
 		},
@@ -68,7 +71,8 @@ func validRequest() Request {
 
 func TestRunnerPersistsProbeApprovalAndIdempotentApply(t *testing.T) {
 	executor := &fakeExecutor{}
-	handler, err := NewHandler(t.TempDir(), string(bytes.Repeat([]byte("r"), 32)), string(bytes.Repeat([]byte("a"), 32)), executor)
+	root := t.TempDir()
+	handler, err := NewHandler(root, string(bytes.Repeat([]byte("r"), 32)), string(bytes.Repeat([]byte("a"), 32)), executor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +114,56 @@ func TestRunnerPersistsProbeApprovalAndIdempotentApply(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(executor.env), []byte("XMCL_ENROLLMENT_TOKEN='aaaaaaaa")) {
 		t.Fatal("bootstrap environment did not contain the enrollment token")
+	}
+	if !bytes.Contains([]byte(executor.env), []byte("OTEL_EXPORTER_OTLP_ENDPOINT='https://otel.example.com'")) ||
+		!bytes.Contains([]byte(executor.env), []byte("OTEL_EXPORTER_OTLP_HEADERS='authorization=node-scoped-value'")) {
+		t.Fatal("bootstrap environment did not contain OTLP settings")
+	}
+	jobRoot := filepath.Join(root, "jobs", input.JobID)
+	persisted, err := os.ReadFile(filepath.Join(jobRoot, "request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedRequest Request
+	if err := json.Unmarshal(persisted, &persistedRequest); err != nil {
+		t.Fatal(err)
+	}
+	if persistedRequest.EnrollmentToken != "" ||
+		persistedRequest.Config.OTLPHeaders != "" {
+		t.Fatal("completed job retained bootstrap credentials")
+	}
+	if _, err := os.Stat(filepath.Join(jobRoot, "bootstrap.env")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed job retained bootstrap environment: %v", err)
+	}
+	if digest, err := os.ReadFile(filepath.Join(jobRoot, "request.sha256")); err != nil ||
+		len(strings.TrimSpace(string(digest))) != 64 {
+		t.Fatalf("request digest was not retained: %q, %v", digest, err)
+	}
+}
+
+func TestRunnerRejectsUnsafeOTLPConfiguration(t *testing.T) {
+	input := validRequest()
+	input.Config.OTLPEndpoint = "http://collector.example.com:4318"
+	if err := validate(input); err == nil {
+		t.Fatal("insecure OTLP endpoint was accepted")
+	}
+	input = validRequest()
+	input.Config.OTLPHeaders = "authorization=value\nINJECTED=value"
+	if err := validate(input); err == nil {
+		t.Fatal("multiline OTLP headers were accepted")
+	}
+	input = validRequest()
+	input.Config.OTLPEndpoint = ""
+	if err := validate(input); err == nil {
+		t.Fatal("OTLP headers without an endpoint were accepted")
+	}
+}
+
+func TestRunnerAllowsLoopbackOTLPCollector(t *testing.T) {
+	input := validRequest()
+	input.Config.OTLPEndpoint = "http://127.0.0.1:4318"
+	if err := validate(input); err != nil {
+		t.Fatal(err)
 	}
 }
 

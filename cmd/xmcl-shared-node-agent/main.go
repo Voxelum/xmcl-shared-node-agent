@@ -10,12 +10,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/voxelum/xmcl-shared-node-agent/internal/agent"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/config"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
 	dockerruntime "github.com/voxelum/xmcl-shared-node-agent/internal/docker"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/quota"
+	"github.com/voxelum/xmcl-shared-node-agent/internal/telemetry"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/workspace"
 )
 
@@ -29,6 +31,19 @@ func main() {
 	if err != nil {
 		fatal(logger, "load configuration", err)
 	}
+	telemetryProvider, err := telemetry.New(
+		ctx, cfg.OTLPEndpoint, cfg.OTLPHeaders, cfg.NodeID, cfg.Region, version,
+	)
+	if err != nil {
+		fatal(logger, "initialize telemetry", err)
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := telemetryProvider.Shutdown(shutdownContext); err != nil {
+			logger.Printf(`{"level":"error","message":"shutdown telemetry","error":%q}`, err.Error())
+		}
+	}()
 	capacity := controlplane.NodeCapacity{
 		TotalMemoryMiB: cfg.TotalMemoryMiB, TotalSharedCPU: cfg.TotalSharedCPU,
 		TotalWorkspaceGiB: cfg.TotalWorkspaceGiB,
@@ -39,6 +54,9 @@ func main() {
 		Region:              cfg.Region,
 		BootstrapCredential: cfg.ControlPlaneCredential,
 		CredentialPath:      filepath.Join(cfg.StateRoot, "control-plane-credential"),
+		HTTPClient: telemetryProvider.HTTPClient(&http.Client{
+			Timeout: 45 * time.Second,
+		}),
 	})
 	if err != nil {
 		fatal(logger, "initialize control-plane client", err)
@@ -66,6 +84,19 @@ func main() {
 	)
 	if err := workspaceManager.Validate(ctx); err != nil {
 		fatal(logger, "validate workspace manager", err)
+	}
+	if err := telemetryProvider.RegisterWorkspaceMetrics(func() telemetry.WorkspaceMetrics {
+		metrics := workspaceManager.Metrics()
+		return telemetry.WorkspaceMetrics{
+			LogicalBytes:      metrics.LogicalBytes,
+			ActualObjectBytes: metrics.ActualObjectBytes,
+			RestoreBytes:      metrics.RestoreBytes,
+			SyncBytes:         metrics.SyncBytes,
+			RestoreFailures:   metrics.RestoreFailures,
+			SyncFailures:      metrics.SyncFailures,
+		}
+	}); err != nil {
+		fatal(logger, "register workspace telemetry", err)
 	}
 	go serveMetrics(logger, cfg.MetricsAddr, workspaceManager.MetricsHandler())
 	state, err := agent.NewFileStore(cfg.StateRoot)

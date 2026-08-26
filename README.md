@@ -145,6 +145,22 @@ remaining allocatable memory/CPU/workspace capacity derived from the managed
 containers, agent version, and the configured ingress host. Empty heartbeat
 bodies are not supported.
 
+## OpenTelemetry
+
+The node agent can export control-plane HTTP traces and workspace metrics over
+OTLP/HTTP. Export is disabled unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+The endpoint must use HTTPS, except that a loopback HTTP collector is allowed.
+Standard `OTEL_EXPORTER_OTLP_HEADERS` can provide a node-scoped collector
+credential. Resource attributes include the stable node ID, logical region,
+agent version, and `service.name=xmcl-shared-node-agent`. Object-storage
+requests are deliberately not instrumented because their signed URLs contain
+temporary credentials and workspace object names.
+
+Application Insights should be connected through a regional OpenTelemetry
+Collector or Azure native OTLP ingestion. Do not distribute an Application
+Insights connection string to every compute node. The existing Prometheus
+listener and signed capacity heartbeat remain available independently of OTLP.
+
 Restore commands must include `connection.host` and numeric
 `connection.hostPort`. The control plane reserves that host port durably before
 dispatch; the agent rejects commands without it and never derives a port from

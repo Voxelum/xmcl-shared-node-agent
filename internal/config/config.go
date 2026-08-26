@@ -8,7 +8,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/voxelum/xmcl-shared-node-agent/internal/otlpconfig"
 )
 
 type Config struct {
@@ -30,6 +33,8 @@ type Config struct {
 	QuotaMountPath         string
 	QuotaProjectBase       uint32
 	MetricsAddr            string
+	OTLPEndpoint           string
+	OTLPHeaders            map[string]string
 }
 
 var ingressHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
@@ -139,6 +144,27 @@ func Load() (Config, error) {
 	if err != nil || (host != "127.0.0.1" && host != "::1" && host != "[::1]" && host != "localhost") {
 		return Config{}, fmt.Errorf("XMCL_METRICS_ADDR must bind to a loopback address")
 	}
+	for _, entry := range os.Environ() {
+		name, value, _ := strings.Cut(entry, "=")
+		if value != "" && (strings.HasPrefix(name, "OTEL_EXPORTER_OTLP_TRACES_") ||
+			strings.HasPrefix(name, "OTEL_EXPORTER_OTLP_METRICS_") ||
+			name == "OTEL_EXPORTER_OTLP_INSECURE") {
+			return Config{}, fmt.Errorf("%s is forbidden; use the validated common OTLP endpoint and headers", name)
+		}
+	}
+	if endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint != "" {
+		if err := otlpconfig.ValidateEndpoint(endpoint); err != nil {
+			return Config{}, err
+		}
+		c.OTLPEndpoint = endpoint
+		c.OTLPHeaders, err = otlpconfig.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+		if err != nil {
+			return Config{}, err
+		}
+	} else if os.Getenv("OTEL_EXPORTER_OTLP_HEADERS") != "" {
+		return Config{}, fmt.Errorf("OTEL_EXPORTER_OTLP_HEADERS requires OTEL_EXPORTER_OTLP_ENDPOINT")
+	}
+
 	return c, nil
 }
 

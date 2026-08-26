@@ -3,6 +3,7 @@ package bootstraprunner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/voxelum/xmcl-shared-node-agent/internal/otlpconfig"
 )
 
 type Request struct {
@@ -49,6 +52,8 @@ type BootstrapConfig struct {
 	ObjectStorageEndpoint string `json:"objectStorageEndpoint"`
 	ObjectStorageRegion   string `json:"objectStorageRegion"`
 	ObjectStorageBucket   string `json:"objectStorageBucket"`
+	OTLPEndpoint          string `json:"otlpEndpoint,omitempty"`
+	OTLPHeaders           string `json:"otlpHeaders,omitempty"`
 	WorkspaceVolumeGiB    int    `json:"workspaceVolumeGiB"`
 	BootstrapTimeout      int    `json:"bootstrapTimeoutSeconds"`
 }
@@ -158,17 +163,42 @@ func (h *Handler) createOrResume(w http.ResponseWriter, r *http.Request) {
 	}
 	canonical, _ := json.Marshal(input)
 	requestPath := filepath.Join(jobDir, "request.json")
-	if existing, err := os.ReadFile(requestPath); err == nil {
-		if !bytes.Equal(existing, canonical) {
+	requestDigest := fmt.Sprintf("%x", sha256.Sum256(canonical))
+	digestPath := filepath.Join(jobDir, "request.sha256")
+	if existingDigest, err := os.ReadFile(digestPath); err == nil {
+		if strings.TrimSpace(string(existingDigest)) != requestDigest {
 			http.Error(w, "idempotency_conflict", http.StatusConflict)
 			return
 		}
-	} else if !errors.Is(err, os.ErrNotExist) || writePrivate(requestPath, canonical) != nil {
+	} else if !errors.Is(err, os.ErrNotExist) {
+		http.Error(w, "runner_unavailable", http.StatusServiceUnavailable)
+		return
+	} else if existing, requestErr := os.ReadFile(requestPath); requestErr == nil {
+		if fmt.Sprintf("%x", sha256.Sum256(existing)) != requestDigest {
+			http.Error(w, "idempotency_conflict", http.StatusConflict)
+			return
+		}
+		if writePrivate(digestPath, []byte(requestDigest+"\n")) != nil {
+			http.Error(w, "runner_unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	} else if !errors.Is(requestErr, os.ErrNotExist) ||
+		writePrivate(requestPath, canonical) != nil ||
+		writePrivate(digestPath, []byte(requestDigest+"\n")) != nil {
 		http.Error(w, "runner_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if exists(filepath.Join(jobDir, "completed")) {
+		if err := finalizeCompletedJob(jobDir, input); err != nil {
+			http.Error(w, "runner_unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		writeStatus(w, http.StatusOK, input.JobID, "completed")
+		return
+	}
+	if existing, err := os.ReadFile(requestPath); err != nil ||
+		!bytes.Equal(existing, canonical) {
+		http.Error(w, "runner_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	knownHostsPath := filepath.Join(jobDir, "known_hosts")
@@ -220,7 +250,28 @@ func (h *Handler) createOrResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runner_unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	if err := finalizeCompletedJob(jobDir, input); err != nil {
+		http.Error(w, "runner_unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	writeStatus(w, http.StatusOK, input.JobID, "completed")
+}
+
+func finalizeCompletedJob(jobDir string, input Request) error {
+	input.EnrollmentToken = ""
+	input.Config.OTLPHeaders = ""
+	redacted, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	if err := writePrivate(filepath.Join(jobDir, "request.json"), redacted); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(jobDir, "bootstrap.env")); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (h *Handler) approve(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -410,6 +461,18 @@ func validate(input Request) error {
 			return errors.New("bootstrap URLs must use HTTPS")
 		}
 	}
+	if input.Config.OTLPEndpoint == "" {
+		if input.Config.OTLPHeaders != "" {
+			return errors.New("OTLP headers require an endpoint")
+		}
+	} else {
+		if err := otlpconfig.ValidateEndpoint(input.Config.OTLPEndpoint); err != nil {
+			return err
+		}
+		if _, err := otlpconfig.ParseHeaders(input.Config.OTLPHeaders); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -423,6 +486,8 @@ func renderEnvironment(input Request) string {
 		{"XMCL_OBJECT_STORAGE_ENDPOINT", input.Config.ObjectStorageEndpoint},
 		{"XMCL_OBJECT_STORAGE_REGION", input.Config.ObjectStorageRegion},
 		{"XMCL_OBJECT_STORAGE_BUCKET", input.Config.ObjectStorageBucket},
+		{"OTEL_EXPORTER_OTLP_ENDPOINT", input.Config.OTLPEndpoint},
+		{"OTEL_EXPORTER_OTLP_HEADERS", input.Config.OTLPHeaders},
 		{"XMCL_RELEASE_MANIFEST_URL", input.Config.ReleaseManifestURL},
 		{"XMCL_RELEASE_MANIFEST_SHA256", input.Config.ReleaseManifestSHA256},
 		{"XMCL_DOCKER_PACKAGE_VERSION", input.Config.DockerPackageVersion},

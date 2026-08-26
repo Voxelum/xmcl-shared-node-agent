@@ -64,6 +64,27 @@ done
   fail "XMCL_RELEASE_MANIFEST_SHA256 is invalid"
 [[ "$XMCL_DOCKER_PACKAGE_VERSION" =~ ^[A-Za-z0-9.+:~_-]+$ ]] ||
   fail "XMCL_DOCKER_PACKAGE_VERSION is invalid"
+if [[ -n ${OTEL_EXPORTER_OTLP_ENDPOINT:-} ]]; then
+  [[ "$OTEL_EXPORTER_OTLP_ENDPOINT" =~ ^https://[^/?#]+(/[^?#]*)?$ ||
+    "$OTEL_EXPORTER_OTLP_ENDPOINT" =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/[^?#]*)?$ ]] ||
+    fail "OTEL_EXPORTER_OTLP_ENDPOINT must use HTTPS or loopback HTTP"
+  [[ ${#OTEL_EXPORTER_OTLP_HEADERS:-} -le 4096 &&
+    "${OTEL_EXPORTER_OTLP_HEADERS:-}" != *$'\n'* &&
+    "${OTEL_EXPORTER_OTLP_HEADERS:-}" != *$'\r'* ]] ||
+    fail "OTEL_EXPORTER_OTLP_HEADERS is invalid"
+  if [[ -n ${OTEL_EXPORTER_OTLP_HEADERS:-} ]]; then
+    IFS=',' read -r -a otlp_headers <<<"$OTEL_EXPORTER_OTLP_HEADERS"
+    for header in "${otlp_headers[@]}"; do
+      [[ "$header" =~ ^[A-Za-z0-9._~-]+=[A-Za-z0-9%._~:/+=-]*$ ]] ||
+        fail "OTEL_EXPORTER_OTLP_HEADERS is invalid"
+      without_escapes=$(sed -E 's/%[0-9A-Fa-f]{2}//g' <<<"$header")
+      [[ "$without_escapes" != *%* ]] ||
+        fail "OTEL_EXPORTER_OTLP_HEADERS has invalid percent encoding"
+    done
+  fi
+elif [[ -n ${OTEL_EXPORTER_OTLP_HEADERS:-} ]]; then
+  fail "OTEL_EXPORTER_OTLP_HEADERS requires OTEL_EXPORTER_OTLP_ENDPOINT"
+fi
 
 for name in XMCL_TOTAL_MEMORY_MIB XMCL_TOTAL_SHARED_CPU \
   XMCL_TOTAL_WORKSPACE_GIB XMCL_WORKSPACE_VOLUME_GIB \
@@ -248,6 +269,14 @@ XMCL_QUOTA_MOUNT_PATH=$data_root
 XMCL_QUOTA_PROJECT_BASE=100000
 XMCL_METRICS_ADDR=127.0.0.1:9464
 EOF
+if [[ -n ${OTEL_EXPORTER_OTLP_ENDPOINT:-} ]]; then
+  printf 'OTEL_EXPORTER_OTLP_ENDPOINT=%s\n' "$OTEL_EXPORTER_OTLP_ENDPOINT" \
+    >>"$agent_env"
+  if [[ -n ${OTEL_EXPORTER_OTLP_HEADERS:-} ]]; then
+    printf 'OTEL_EXPORTER_OTLP_HEADERS=%s\n' "$OTEL_EXPORTER_OTLP_HEADERS" \
+      >>"$agent_env"
+  fi
+fi
 chmod 0600 "$agent_env"
 
 install -o root -g root -m 0644 \

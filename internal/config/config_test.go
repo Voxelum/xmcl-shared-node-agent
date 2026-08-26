@@ -57,6 +57,61 @@ func TestLoadRejectsPublicMetricsAddress(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesOptionalOTLPExporter(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://otel.example.test",
+		"http://127.0.0.1:4318",
+		"http://[::1]:4318",
+	} {
+		setCanonicalEnvironment(t)
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+		config, err := Load()
+		if err != nil {
+			t.Fatalf("endpoint %q: %v", endpoint, err)
+		}
+		if config.OTLPEndpoint != endpoint {
+			t.Fatalf("endpoint %q did not enable OTLP", endpoint)
+		}
+	}
+}
+
+func TestLoadRejectsSignalSpecificOTLPOverrides(t *testing.T) {
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_EXPORTER_OTLP_INSECURE",
+	} {
+		setCanonicalEnvironment(t)
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://otel.example.test")
+		t.Setenv(name, "override")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+			t.Fatalf("%s was unexpectedly accepted: %v", name, err)
+		}
+	}
+}
+
+func TestLoadRejectsUnsafeOTLPExporter(t *testing.T) {
+	for _, endpoint := range []string{
+		"http://collector.example.test:4318",
+		"https://user:secret@collector.example.test",
+		"https://collector.example.test?token=secret",
+	} {
+		setCanonicalEnvironment(t)
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_ENDPOINT") {
+			t.Fatalf("endpoint %q was unexpectedly accepted: %v", endpoint, err)
+		}
+	}
+}
+
+func TestLoadRejectsOTLPHeadersWithoutEndpoint(t *testing.T) {
+	setCanonicalEnvironment(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=node-token")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_HEADERS") {
+		t.Fatalf("orphan OTLP headers were unexpectedly accepted: %v", err)
+	}
+}
+
 func TestLoadRequiresAPISafeIngressHost(t *testing.T) {
 	setCanonicalEnvironment(t)
 	t.Setenv("XMCL_SHARED_NODE_INGRESS_HOST", "https://public-node.example")
@@ -130,6 +185,8 @@ func setCanonicalEnvironment(t *testing.T) {
 		"XMCL_QUOTA_MOUNT_PATH":                    "/var/lib/xmcl-shared",
 		"XMCL_QUOTA_PROJECT_BASE":                  "1000",
 		"XMCL_METRICS_ADDR":                        "127.0.0.1:9464",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":              "",
+		"OTEL_EXPORTER_OTLP_HEADERS":               "",
 	} {
 		t.Setenv(name, value)
 	}
