@@ -98,7 +98,7 @@ usermod -aG docker xmcl-agent
 install -d -o root -g root -m 0750 \
   "$state_dir" /etc/xmcl-shared-node-agent
 install -d -o root -g root -m 0755 /usr/local/libexec
-install -d -o root -g root -m 0750 "$data_root"
+install -d -o root -g xmcl-agent -m 0750 "$data_root"
 
 release_manifest="$state_dir/release-manifest.json"
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
