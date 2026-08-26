@@ -68,20 +68,20 @@ jobs:
               ssh -o BatchMode=yes -o IdentitiesOnly=yes \
                 -o StrictHostKeyChecking=yes "root@$HOST" \
                 "read -r secret
-                 curl --fail-with-body --silent --show-error
-                   --header \"Authorization: Bearer \$secret\"
-                   --header 'Content-Type: application/json'
-                   --request POST
-                   --data '{\"fingerprint\":\"$FINGERPRINT\"}'
+                 curl --fail-with-body --silent --show-error \
+                   --header \"Authorization: Bearer \$secret\" \
+                   --header 'Content-Type: application/json' \
+                   --request POST \
+                   --data '{\"fingerprint\":\"$FINGERPRINT\"}' \
                    'http://127.0.0.1:8088/v1/bootstrap-jobs/$JOB_ID/approve'"
           else
             printf '%s\n' "$APPROVAL_SECRET" |
               ssh -o BatchMode=yes -o IdentitiesOnly=yes \
                 -o StrictHostKeyChecking=yes "root@$HOST" \
                 "read -r secret
-                 curl --fail-with-body --silent --show-error
-                   --header \"Authorization: Bearer \$secret\"
-                   --header 'Content-Type: application/json'
-                   --request POST
+                 curl --fail-with-body --silent --show-error \
+                   --header \"Authorization: Bearer \$secret\" \
+                   --header 'Content-Type: application/json' \
+                   --request POST \
                    'http://127.0.0.1:8088/v1/bootstrap-jobs/$JOB_ID/status'"
           fi
