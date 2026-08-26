@@ -1,0 +1,68 @@
+name: Deploy LightNode bootstrap runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: Reviewed LightNode runner IPv4 address
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-lightnode-staging-runner
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate input and prepare SSH identity
+        env:
+          HOST: ${{ inputs.host }}
+          INITIAL_SSH_KEY: ${{ secrets.LIGHTNODE_RUNNER_INITIAL_SSH_KEY }}
+        run: |
+          [[ "$HOST" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]
+          test -n "$INITIAL_SSH_KEY"
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$INITIAL_SSH_KEY" >"$HOME/.ssh/id_rsa"
+          chmod 0600 "$HOME/.ssh/id_rsa"
+          ssh-keyscan -T 15 -t ed25519 "$HOST" >"$HOME/.ssh/known_hosts"
+          test "$(wc -l <"$HOME/.ssh/known_hosts")" -eq 1
+          ssh-keygen -lf "$HOME/.ssh/known_hosts" -E sha256
+      - name: Install pinned runner release
+        env:
+          HOST: ${{ inputs.host }}
+          RUNNER_SECRET: ${{ secrets.LIGHTNODE_RUNNER_SECRET }}
+          APPROVAL_SECRET: ${{ secrets.LIGHTNODE_RUNNER_APPROVAL_SECRET }}
+        run: |
+          scp -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            deploy/lightnode/install-runner.sh \
+            "root@$HOST:/root/install-xmcl-lightnode-runner.sh"
+          scp -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "$HOME/.ssh/id_rsa" "root@$HOST:/root/bootstrap-key"
+          printf '%s\n%s\n' "$RUNNER_SECRET" "$APPROVAL_SECRET" |
+            ssh -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes "root@$HOST" \
+              "chmod 0700 /root/install-xmcl-lightnode-runner.sh &&
+               export XMCL_LIGHTNODE_BOOTSTRAP_KEY_FILE=/root/bootstrap-key &&
+               /root/install-xmcl-lightnode-runner.sh '$HOST'"
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes "root@$HOST" \
+            "rm -f /root/bootstrap-key /root/install-xmcl-lightnode-runner.sh &&
+             systemctl is-active --quiet xmcl-lightnode-bootstrap-runner &&
+             systemctl is-active --quiet nginx"
+      - name: Verify public HTTPS boundary
+        env:
+          HOST: ${{ inputs.host }}
+        run: |
+          test "$(curl --silent --show-error --output /dev/null \
+            --write-out '%{http_code}' --request POST \
+            "https://$HOST.sslip.io/v1/bootstrap-jobs")" = "401"

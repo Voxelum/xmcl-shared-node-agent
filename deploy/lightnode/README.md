@@ -52,6 +52,16 @@ loopback, so operators must invoke them on the runner host or through an
 authenticated SSH/VPN tunnel. Replace the example hostname and certificate
 paths before enabling the site.
 
+The staging runner is installed by the manually dispatched
+`deploy-lightnode-runner.yml` workflow. The workflow accepts a reviewed runner
+IPv4 address, pins the first ED25519 host key in its ephemeral job, and invokes
+`install-runner.sh`. The installer verifies the immutable v0.3.3 runner bundle,
+stores the environment bootstrap key under the runner state root, configures
+the systemd sandbox, and obtains TLS for the address-backed `sslip.io` name.
+The initial SSH key and runner secrets are staging environment secrets and
+must be removed after deployment. TCP 22 is then restricted to the runner
+address; noVNC remains break-glass only.
+
 The uploaded bootstrap environment pins one `XMCL_RELEASE_MANIFEST_URL` and its
 exact `XMCL_RELEASE_MANIFEST_SHA256`. The manifest supplies the only accepted
 agent hash, quota-helper hash, runtime image digest, and raw runtime-catalog
