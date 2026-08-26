@@ -147,7 +147,8 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl start nginx
 systemctl daemon-reload
-systemctl enable --now xmcl-lightnode-bootstrap-runner
+systemctl enable xmcl-lightnode-bootstrap-runner
+systemctl restart xmcl-lightnode-bootstrap-runner
 systemctl is-active --quiet xmcl-lightnode-bootstrap-runner
 test "$(curl --silent --show-error --output /dev/null \
   --write-out '%{http_code}' --request POST \
