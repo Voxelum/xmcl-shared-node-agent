@@ -129,3 +129,15 @@ The first run creates a sparse 4 GiB XFS image at
 completes restore, quota application, container health, start reporting,
 graceful stop, immutable workspace sync, manifest publication, and local
 workspace release. It never contacts LightNode or deployed XMCL APIs.
+
+The real Azure acceptance generator requires the run-isolated compiler object
+key explicitly:
+
+```text
+go run deploy/lightnode/generate-acceptance-content.go \
+  <archive> <metadata> \
+  shared-hosting/<acceptance-account>/<service>/compiler-content/vanilla-1.21.1.tar.zst
+```
+
+Use new account and service suffixes for every run. Reusing a prior revision
+prefix or deleting its immutable objects is not an acceptance setup step.

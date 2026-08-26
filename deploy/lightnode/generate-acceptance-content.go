@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -19,10 +20,13 @@ import (
 )
 
 const (
-	contentKey = "shared-hosting/acceptance-account/acceptance-service/compiler-content/vanilla-1.21.1.tar.zst"
 	serverURL  = "https://piston-data.mojang.com/v1/objects/59353fb40c36d304f2035d51e7d6e6baa98dc05c/server.jar"
 	serverSHA  = "e3bc55693e93cda0188f2e60aea28113fc647c5e85a15fa3d1b347349231b4bb"
 	serverSize = 51627615
+)
+
+var contentKeyPattern = regexp.MustCompile(
+	`^shared-hosting/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}/compiler-content/vanilla-1\.21\.1\.tar\.zst$`,
 )
 
 type contentFile struct {
@@ -32,8 +36,12 @@ type contentFile struct {
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		panic("usage: go run generate-acceptance-content.go <archive> <metadata>")
+	if len(os.Args) != 4 {
+		panic("usage: go run generate-acceptance-content.go <archive> <metadata> <content-key>")
+	}
+	contentKey := os.Args[3]
+	if !contentKeyPattern.MatchString(contentKey) {
+		panic("content key must be an isolated shared-hosting account/service compiler-content key")
 	}
 	server := downloadServer()
 	runtimeJSON, err := json.Marshal(map[string]any{
