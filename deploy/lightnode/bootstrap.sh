@@ -95,7 +95,9 @@ id xmcl-agent >/dev/null 2>&1 ||
     --no-create-home --shell /usr/sbin/nologin xmcl-agent
 usermod -aG docker xmcl-agent
 
-install -d -o root -g root -m 0750 "$state_dir" /etc/xmcl-shared-node-agent
+install -d -o root -g root -m 0750 \
+  "$state_dir" /etc/xmcl-shared-node-agent
+install -d -o root -g root -m 0755 /usr/local/libexec
 install -d -o root -g root -m 0750 "$data_root"
 
 release_manifest="$state_dir/release-manifest.json"
