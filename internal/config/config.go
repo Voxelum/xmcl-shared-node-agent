@@ -21,7 +21,6 @@ type Config struct {
 	ControlPlaneCredential string
 	IngressHost            string
 	ObjectStorageEndpoint  string
-	ObjectStorageRegion    string
 	ObjectStorageBucket    string
 	WorkspaceRoot          string
 	StateRoot              string
@@ -40,6 +39,7 @@ type Config struct {
 var ingressHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
 var sharedNodeRegionPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
 var runtimeImagePattern = regexp.MustCompile(`^ghcr\.io/voxelum/xmcl-shared-minecraft-runtime@sha256:[a-f0-9]{64}$`)
+var azureContainerPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$`)
 
 func Load() (Config, error) {
 	required := func(name string) (string, error) {
@@ -71,9 +71,8 @@ func Load() (Config, error) {
 		{"XMCL_SHARED_NODE_REGION", &c.Region},
 		{"XMCL_CONTROL_PLANE_URL", &c.ControlPlaneURL},
 		{"XMCL_SHARED_NODE_INGRESS_HOST", &c.IngressHost},
-		{"XMCL_VULTR_OBJECT_STORAGE_ENDPOINT", &c.ObjectStorageEndpoint},
-		{"XMCL_VULTR_OBJECT_STORAGE_REGION", &c.ObjectStorageRegion},
-		{"XMCL_VULTR_OBJECT_STORAGE_BUCKET", &c.ObjectStorageBucket},
+		{"XMCL_AZURE_BLOB_ENDPOINT", &c.ObjectStorageEndpoint},
+		{"XMCL_AZURE_BLOB_CONTAINER", &c.ObjectStorageBucket},
 		{"XMCL_WORKSPACE_ROOT", &c.WorkspaceRoot},
 		{"XMCL_STATE_ROOT", &c.StateRoot},
 		{"XMCL_CONTAINER_IMAGE", &c.ContainerImage},
@@ -94,6 +93,10 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("XMCL_CONTAINER_IMAGE must be an immutable XMCL shared Minecraft runtime digest")
 	}
 	for _, name := range []string{
+		"AZURE_STORAGE_ACCOUNT",
+		"AZURE_STORAGE_KEY",
+		"AZURE_STORAGE_CONNECTION_STRING",
+		"AZURE_CLIENT_SECRET",
 		"XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY",
 		"XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY",
 		"XMCL_VULTR_OBJECT_STORAGE_CREDENTIAL_URL",
@@ -104,6 +107,10 @@ func Load() (Config, error) {
 	}
 	if err := validateObjectStorageEndpoint(c.ObjectStorageEndpoint); err != nil {
 		return Config{}, err
+	}
+	if !azureContainerPattern.MatchString(c.ObjectStorageBucket) ||
+		strings.Contains(c.ObjectStorageBucket, "--") {
+		return Config{}, fmt.Errorf("XMCL_AZURE_BLOB_CONTAINER must be a valid Azure Blob container name")
 	}
 	c.WorkspaceRoot, err = filepath.Abs(c.WorkspaceRoot)
 	if err != nil {
@@ -172,8 +179,9 @@ func validateObjectStorageEndpoint(rawURL string) error {
 	endpoint, err := url.Parse(rawURL)
 	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" ||
 		endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" ||
-		(endpoint.Path != "" && endpoint.Path != "/") {
-		return fmt.Errorf("XMCL_VULTR_OBJECT_STORAGE_ENDPOINT must be an absolute HTTPS origin without credentials, path, query, or fragment")
+		(endpoint.Path != "" && endpoint.Path != "/") ||
+		!strings.HasSuffix(strings.ToLower(endpoint.Hostname()), ".blob.core.windows.net") {
+		return fmt.Errorf("XMCL_AZURE_BLOB_ENDPOINT must be an Azure Blob HTTPS origin without credentials, path, query, or fragment")
 	}
 	return nil
 }

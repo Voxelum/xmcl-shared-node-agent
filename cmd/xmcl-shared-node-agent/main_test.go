@@ -1,17 +1,39 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/voxelum/xmcl-shared-node-agent/internal/agent"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/config"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
 )
+
+func TestCommandFailureLogIsStructuredAndRedactsURLs(t *testing.T) {
+	var output bytes.Buffer
+	logCommandFailure(log.New(&output, "", 0), controlplane.Command{
+		CommandID: "command-1", Kind: controlplane.RestoreAndStart,
+		ServiceID: "service-1", AssignmentID: "assignment-1",
+	}, errors.New("download https://account.blob.core.windows.net/container/key?sig=secret failed"))
+	entry := map[string]string{}
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "sig=secret") ||
+		entry["error"] != "download [redacted-url] failed" {
+		t.Fatalf("unsafe command failure log: %s", output.String())
+	}
+	if entry["commandId"] != "command-1" || entry["commandKind"] != controlplane.RestoreAndStart {
+		t.Fatalf("incomplete command failure log: %#v", entry)
+	}
+}
 
 func TestWriteReadyMarkerPublishesConfirmedNode(t *testing.T) {
 	root := t.TempDir()

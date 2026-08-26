@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -124,10 +126,35 @@ func main() {
 		Status: func() controlplane.NodeStatus {
 			return deriveNodeStatus(ctx, cfg, runtime.Running, version)
 		},
+		CommandFailure: func(command controlplane.Command, err error) {
+			telemetryProvider.RecordCommandFailure(ctx, command.Kind)
+			logCommandFailure(logger, command, err)
+		},
 	}
 	if err := daemon.Run(ctx); err != nil {
 		fatal(logger, "agent stopped", err)
 	}
+}
+
+var commandErrorURL = regexp.MustCompile(`https?://[^\s]+`)
+
+func logCommandFailure(logger *log.Logger, command controlplane.Command, err error) {
+	summary := commandErrorURL.ReplaceAllString(err.Error(), "[redacted-url]")
+	summary = strings.Join(strings.Fields(summary), " ")
+	if len(summary) > 512 {
+		summary = summary[:512]
+	}
+	entry, marshalErr := json.Marshal(map[string]string{
+		"level": "error", "message": "process command",
+		"commandId": command.CommandID, "commandKind": command.Kind,
+		"serviceId": command.ServiceID, "assignmentId": command.AssignmentID,
+		"error": summary, "version": version,
+	})
+	if marshalErr != nil {
+		logger.Printf(`{"level":"error","message":"process command"}`)
+		return
+	}
+	logger.Print(string(entry))
 }
 
 func writeReadyMarker(stateRoot, nodeID string) error {

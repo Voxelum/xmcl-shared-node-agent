@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,10 +18,11 @@ import (
 )
 
 var ErrAlreadyExists = errors.New("object already exists")
+var azureContainerPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$`)
 
 // DirectTransfer follows no redirects and never has access to a control-plane
-// credential. It accepts only HTTPS grants for the configured Vultr host and
-// exact path-style bucket/key association.
+// credential. It accepts only HTTPS SAS grants for the configured Azure Blob
+// account and exact container/key association.
 type DirectTransfer struct {
 	storageHost string
 	bucket      string
@@ -31,11 +33,12 @@ type DirectTransfer struct {
 func NewDirectTransfer(endpoint, bucket string, client *http.Client) (*DirectTransfer, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
-		parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return nil, errors.New("object storage endpoint must be an HTTPS origin")
+		parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") ||
+		!strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".blob.core.windows.net") {
+		return nil, errors.New("object storage endpoint must be an Azure Blob HTTPS origin")
 	}
-	if bucket == "" || strings.Contains(bucket, "/") {
-		return nil, errors.New("object storage bucket is invalid")
+	if !azureContainerPattern.MatchString(bucket) || strings.Contains(bucket, "--") {
+		return nil, errors.New("Azure Blob container is invalid")
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Minute}
@@ -92,7 +95,7 @@ func (t *DirectTransfer) Upload(ctx context.Context, grant controlplane.Workspac
 		return TransferResult{}, fmt.Errorf("send direct PUT request: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode == http.StatusPreconditionFailed {
+	if isAlreadyExistsResponse(response) {
 		return TransferResult{}, ErrAlreadyExists
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
@@ -102,6 +105,12 @@ func (t *DirectTransfer) Upload(ctx context.Context, grant controlplane.Workspac
 		return TransferResult{}, errors.New("direct upload source does not match descriptor")
 	}
 	return TransferResult{Size: reader.size, SHA256: expectedSHA256}, nil
+}
+
+func isAlreadyExistsResponse(response *http.Response) bool {
+	return response.StatusCode == http.StatusPreconditionFailed ||
+		response.StatusCode == http.StatusConflict &&
+			response.Header.Get("x-ms-error-code") == "BlobAlreadyExists"
 }
 
 func (t *DirectTransfer) validateGrant(grant controlplane.WorkspaceGrant, key, method string) error {
@@ -126,8 +135,13 @@ func (t *DirectTransfer) validateGrant(grant controlplane.WorkspaceGrant, key, m
 		}
 		return nil
 	}
-	if len(grant.Headers) != 1 || grant.Headers["if-none-match"] != "*" {
-		return errors.New("direct PUT grant is missing immutable write precondition")
+	headers := make(map[string]string, len(grant.Headers))
+	for name, value := range grant.Headers {
+		headers[strings.ToLower(name)] = value
+	}
+	if len(headers) != 2 || headers["if-none-match"] != "*" ||
+		headers["x-ms-blob-type"] != "BlockBlob" {
+		return errors.New("direct PUT grant is missing immutable Azure Blob headers")
 	}
 	return nil
 }

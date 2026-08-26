@@ -24,9 +24,10 @@ import (
 )
 
 type Provider struct {
-	tracerProvider *sdktrace.TracerProvider
-	meterProvider  *sdkmetric.MeterProvider
-	transport      http.RoundTripper
+	tracerProvider  *sdktrace.TracerProvider
+	meterProvider   *sdkmetric.MeterProvider
+	transport       http.RoundTripper
+	commandFailures metric.Int64Counter
 }
 
 type WorkspaceMetrics struct {
@@ -112,9 +113,16 @@ func New(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
+	commandFailures, err := meterProvider.Meter(
+		"github.com/voxelum/xmcl-shared-node-agent/internal/agent",
+	).Int64Counter("xmcl.shared.command.failures")
+	if err != nil {
+		return nil, err
+	}
 	return &Provider{
-		tracerProvider: tracerProvider,
-		meterProvider:  meterProvider,
+		tracerProvider:  tracerProvider,
+		meterProvider:   meterProvider,
+		commandFailures: commandFailures,
 		transport: otelhttp.NewTransport(
 			http.DefaultTransport,
 			otelhttp.WithSpanNameFormatter(func(_ string, request *http.Request) string {
@@ -122,6 +130,15 @@ func New(
 			}),
 		),
 	}, nil
+}
+
+func (p *Provider) RecordCommandFailure(ctx context.Context, commandKind string) {
+	if p.commandFailures == nil {
+		return
+	}
+	p.commandFailures.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("xmcl.command.kind", commandKind),
+	))
 }
 
 func (p *Provider) RegisterWorkspaceMetrics(snapshot func() WorkspaceMetrics) error {

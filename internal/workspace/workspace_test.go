@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,15 +135,17 @@ func (g *memoryGrants) PublishWorkspaceGrant(_ context.Context, command controlp
 
 func putGrant(key string) controlplane.WorkspaceGrant {
 	return controlplane.WorkspaceGrant{
-		Key: key, Method: "PUT", URL: "https://sgp1.vultrobjects.com/bucket/" + key,
+		Key: key, Method: "PUT", URL: "https://xmclstaging.blob.core.windows.net/bucket/" + key,
 		ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339),
-		Headers:   map[string]string{"if-none-match": "*"},
+		Headers: map[string]string{
+			"if-none-match": "*", "x-ms-blob-type": "BlockBlob",
+		},
 	}
 }
 
 func getGrant(key string) controlplane.WorkspaceGrant {
 	return controlplane.WorkspaceGrant{
-		Key: key, Method: "GET", URL: "https://sgp1.vultrobjects.com/bucket/" + key,
+		Key: key, Method: "GET", URL: "https://xmclstaging.blob.core.windows.net/bucket/" + key,
 		ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339),
 	}
 }
@@ -549,7 +552,7 @@ func TestValidateManifestRejectsForeignKeysAndLayerMappings(t *testing.T) {
 }
 
 func TestDirectTransferRejectsForeignURL(t *testing.T) {
-	transfer, err := NewDirectTransfer("https://sgp1.vultrobjects.com", "bucket", nil)
+	transfer, err := NewDirectTransfer("https://xmclstaging.blob.core.windows.net", "bucket", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,6 +563,55 @@ func TestDirectTransferRejectsForeignURL(t *testing.T) {
 	}, "shared-hosting/a/s/content/x.tar.zst", 10, io.Discard)
 	if err == nil {
 		t.Fatal("foreign grant URL was accepted")
+	}
+}
+
+func TestDirectTransferRequiresAzureBlobOrigin(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://objects.example.com",
+		"https://xmclstaging.blob.core.windows.net/container",
+		"http://xmclstaging.blob.core.windows.net",
+	} {
+		if _, err := NewDirectTransfer(endpoint, "bucket", nil); err == nil {
+			t.Fatalf("non-Azure Blob origin %q was accepted", endpoint)
+		}
+	}
+}
+
+func TestDirectTransferRequiresImmutableAzurePutHeaders(t *testing.T) {
+	transfer, err := NewDirectTransfer(
+		"https://xmclstaging.blob.core.windows.net",
+		"bucket",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "shared-hosting/a/s/revisions/1/manifest.json"
+	grant := controlplane.WorkspaceGrant{
+		Key: key, Method: "PUT",
+		URL:       "https://xmclstaging.blob.core.windows.net/bucket/" + key + "?sig=opaque",
+		ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339),
+		Headers: map[string]string{
+			"If-None-Match": "*", "x-ms-blob-type": "BlockBlob",
+		},
+	}
+	if err := transfer.validateGrant(grant, key, "PUT"); err != nil {
+		t.Fatal(err)
+	}
+	delete(grant.Headers, "x-ms-blob-type")
+	if err := transfer.validateGrant(grant, key, "PUT"); err == nil {
+		t.Fatal("Azure PUT without blob type was accepted")
+	}
+}
+
+func TestDirectTransferRecognizesAzureImmutableConflict(t *testing.T) {
+	response := &http.Response{
+		StatusCode: http.StatusConflict,
+		Header:     http.Header{"X-Ms-Error-Code": {"BlobAlreadyExists"}},
+	}
+	if !isAlreadyExistsResponse(response) {
+		t.Fatal("Azure immutable conflict was not recognized")
 	}
 }
 

@@ -18,7 +18,7 @@ func TestLoadUsesOnlyCanonicalObjectStorageVariables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.ObjectStorageEndpoint != "https://sgp1.vultrobjects.com" || config.ObjectStorageBucket != "workspaces" {
+	if config.ObjectStorageEndpoint != "https://xmclstaging.blob.core.windows.net" || config.ObjectStorageBucket != "workspaces" {
 		t.Fatalf("canonical object storage values were not loaded: %#v", config)
 	}
 }
@@ -26,6 +26,10 @@ func TestLoadUsesOnlyCanonicalObjectStorageVariables(t *testing.T) {
 func TestLoadRejectsStaticObjectStorageCredentialsAndCredentialEndpoint(t *testing.T) {
 	setCanonicalEnvironment(t)
 	for _, name := range []string{
+		"AZURE_STORAGE_ACCOUNT",
+		"AZURE_STORAGE_KEY",
+		"AZURE_STORAGE_CONNECTION_STRING",
+		"AZURE_CLIENT_SECRET",
 		"XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY",
 		"XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY",
 		"XMCL_VULTR_OBJECT_STORAGE_CREDENTIAL_URL",
@@ -40,11 +44,25 @@ func TestLoadRejectsStaticObjectStorageCredentialsAndCredentialEndpoint(t *testi
 
 func TestLoadRejectsLegacyObjectStorageVariables(t *testing.T) {
 	setCanonicalEnvironment(t)
-	t.Setenv("XMCL_VULTR_OBJECT_STORAGE_ENDPOINT", "")
+	t.Setenv("XMCL_AZURE_BLOB_ENDPOINT", "")
 	t.Setenv("XMCL_S3_ENDPOINT", "legacy.invalid")
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "XMCL_VULTR_OBJECT_STORAGE_ENDPOINT") {
+	if err == nil || !strings.Contains(err.Error(), "XMCL_AZURE_BLOB_ENDPOINT") {
 		t.Fatalf("legacy object-storage variables unexpectedly accepted: %v", err)
+	}
+}
+
+func TestLoadRequiresAzureBlobStorageOrigin(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://objects.example.com",
+		"https://xmclstaging.blob.core.windows.net/container",
+		"http://xmclstaging.blob.core.windows.net",
+	} {
+		setCanonicalEnvironment(t)
+		t.Setenv("XMCL_AZURE_BLOB_ENDPOINT", endpoint)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "XMCL_AZURE_BLOB_ENDPOINT") {
+			t.Fatalf("endpoint %q was unexpectedly accepted: %v", endpoint, err)
+		}
 	}
 }
 
@@ -169,9 +187,12 @@ func setCanonicalEnvironment(t *testing.T) {
 		"XMCL_CONTROL_PLANE_URL":                   "https://control.example.test",
 		"XMCL_CONTROL_PLANE_CREDENTIAL":            "bootstrap",
 		"XMCL_SHARED_NODE_INGRESS_HOST":            "198.51.100.10",
-		"XMCL_VULTR_OBJECT_STORAGE_ENDPOINT":       "https://sgp1.vultrobjects.com",
-		"XMCL_VULTR_OBJECT_STORAGE_REGION":         "sgp",
-		"XMCL_VULTR_OBJECT_STORAGE_BUCKET":         "workspaces",
+		"XMCL_AZURE_BLOB_ENDPOINT":                 "https://xmclstaging.blob.core.windows.net",
+		"XMCL_AZURE_BLOB_CONTAINER":                "workspaces",
+		"AZURE_STORAGE_ACCOUNT":                    "",
+		"AZURE_STORAGE_KEY":                        "",
+		"AZURE_STORAGE_CONNECTION_STRING":          "",
+		"AZURE_CLIENT_SECRET":                      "",
 		"XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY":     "",
 		"XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY":     "",
 		"XMCL_VULTR_OBJECT_STORAGE_CREDENTIAL_URL": "",

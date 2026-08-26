@@ -356,7 +356,7 @@ func TestClientRequestsLeaseBoundWorkspaceGrant(t *testing.T) {
 			!strings.Contains(string(body), `"leaseToken":"lease-token"`) {
 			t.Fatalf("grant request body = %s", body)
 		}
-		_, _ = w.Write([]byte(`{"contractVersion":2,"grants":[{"key":"shared-hosting/account-1/service-1/revisions/1/manifest.json","method":"GET","url":"https://sgp1.vultrobjects.com/workspaces/shared-hosting/account-1/service-1/revisions/1/manifest.json?signature=only-a-url","expiresAt":"2026-01-01T01:00:00Z"}]}`))
+		_, _ = w.Write([]byte(`{"contractVersion":2,"grants":[{"key":"shared-hosting/account-1/service-1/revisions/1/manifest.json","method":"GET","url":"https://xmclstaging.blob.core.windows.net/workspaces/shared-hosting/account-1/service-1/revisions/1/manifest.json?signature=only-a-url","expiresAt":"2026-01-01T01:00:00Z"}]}`))
 	}))
 	defer server.Close()
 

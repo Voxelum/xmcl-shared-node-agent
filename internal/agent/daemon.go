@@ -22,6 +22,7 @@ type Daemon struct {
 	Executor          *Executor
 	Status            func() controlplane.NodeStatus
 	Ready             func() error
+	CommandFailure    func(controlplane.Command, error)
 	HeartbeatInterval time.Duration
 }
 
@@ -170,9 +171,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		if err := d.Process(ctx, command); err != nil && !errors.Is(err, ErrLeaseLost) {
+		if err := d.Process(ctx, command); err != nil {
 			if ctx.Err() != nil {
 				return nil
+			}
+			if d.CommandFailure != nil {
+				d.CommandFailure(command, err)
 			}
 		}
 	}

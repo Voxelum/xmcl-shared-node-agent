@@ -83,6 +83,7 @@ func TestDisabledProviderUsesDefaultTransport(t *testing.T) {
 	if provider.transport != http.DefaultTransport {
 		t.Fatal("disabled provider replaced the default transport")
 	}
+	provider.RecordCommandFailure(t.Context(), "workspace.restore_and_start")
 	if err := provider.Shutdown(t.Context()); err != nil {
 		t.Fatal(err)
 	}

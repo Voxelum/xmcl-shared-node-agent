@@ -1,8 +1,10 @@
 # Shared Workspace Object Storage v2
 
-Use one private Vultr Object Storage bucket per environment. Disable public
-ACLs and static website hosting. Only the Worker/control plane owns the bucket
-access key and secret; compute nodes receive no storage credentials.
+Use one private Azure Blob Storage account and container per environment.
+Disable anonymous blob access, shared-key authorization where workload identity
+is available, and static website hosting. Only the control plane may mint
+short-lived user-delegation SAS grants; compute nodes receive no storage
+credentials.
 
 ## Canonical layout
 
@@ -40,24 +42,17 @@ unbounded multipart operations.
 
 ## Access model
 
-Configure the agent only with the Vultr HTTPS endpoint, region, and bucket.
-Do **not** set `XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY`,
-`XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY`, or
-`XMCL_VULTR_OBJECT_STORAGE_CREDENTIAL_URL`.
-
-The active shared-node pool is Singapore because the current authenticated
-Vultr account has no Taipei Compute or Object Storage location. Use:
+Configure the agent only with the exact Azure Blob account endpoint and
+container. Do **not** set `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_KEY`,
+`AZURE_STORAGE_CONNECTION_STRING`, or `AZURE_CLIENT_SECRET`.
 
 ```text
-VULTR_SHARED_NODE_REGION_ID=sgp
-XMCL_VULTR_OBJECT_STORAGE_ENDPOINT=https://sgp1.vultrobjects.com
-XMCL_VULTR_OBJECT_STORAGE_REGION=sgp
-XMCL_SHARED_NODE_REGION=sgp  # cloud-init owned; operators do not set it manually
+XMCL_AZURE_BLOB_ENDPOINT=https://<account>.blob.core.windows.net
+XMCL_AZURE_BLOB_CONTAINER=<private-container>
 ```
 
-A future multi-region product needs explicit region selection and a
-cross-region data policy; it is out of scope. Do not declare production
-readiness until the Singapore staging validation below succeeds.
+Place the storage account in the selected Camp data region and use an explicit
+cross-region replication policy before enabling another compute region.
 
 For the current authenticated command and lease only, the control plane issues
 10-minute (maximum 15-minute) pre-signed URLs:
@@ -66,15 +61,16 @@ For the current authenticated command and lease only, the control plane issues
 - sync: PUT only for validated blobs for `revision + 1`;
 - publish: PUT only for that revision's `manifest.json`.
 
-PUT URLs require `If-None-Match: *`. Agents neither list nor delete objects;
-the Worker does not proxy workspace bytes. Bucket policy should permit the
-Worker signing credential only the S3 object actions needed for this isolated
-bucket. Do not grant node identities any S3 policy, key, or role.
+PUT URLs require `If-None-Match: *` and `x-ms-blob-type: BlockBlob`. Agents
+neither list nor delete objects; the control plane does not proxy workspace
+bytes. Grant the control-plane identity only the Azure Blob Data Contributor
+actions needed for this isolated container and prefer user-delegation SAS over
+account-key SAS. Do not grant node identities an Azure role, key, or identity.
 
 ## Required staging validation
 
 Do not declare production readiness until this sequence succeeds against a real
-private Vultr bucket and VM:
+private Azure Blob container and VM:
 
 ```text
 VM enroll -> restore revision -> start -> stop -> upload blobs ->

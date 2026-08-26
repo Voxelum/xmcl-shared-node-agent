@@ -2,7 +2,7 @@
 
 The shared-node agent is the privileged, Go-based execution component for one
 shared-hosting compute node. It restores verified Minecraft workspaces
-through short-lived command-scoped S3 SigV4 URL grants, runs a hardened Docker
+through short-lived command-scoped Azure Blob SAS grants, runs a hardened Docker
 container, and syncs immutable revisions before acknowledging a stop.
 
 This repository is the canonical source for the host agent, quota helper,
@@ -18,14 +18,14 @@ privileged node agent or Minecraft runtime image.
   container.
 - Per-service file locks prevent concurrent agents from operating on the same
   local workspace.
-- Restore accepts only granted HTTPS URLs for the configured Vultr storage host.
+- Restore accepts only granted HTTPS SAS URLs for the configured Azure Blob account.
   It rejects redirects, foreign URLs, traversal, duplicate archive entries,
   symlinks, decompression bombs, invalid path mappings, and hash/size failures
   before replacing the active workspace.
 - Sync creates deterministic streaming `.tar.zst` mutation layers, hashes while
   streaming, obtains PUT URLs only for validated exact objects, and publishes
   `manifest.json` last with an immutable-write precondition.
-- The agent has no S3 access key, secret key, List, Delete, bucket-stat, or
+- The agent has no Azure storage key, connection string, List, Delete, container
   arbitrary-key operation. It never stores URL grants.
 - Containers run as UID/GID `1000`, have a read-only root filesystem, one
   non-recursive writable `/data` bind mount for their direct workspace only,
@@ -54,9 +54,8 @@ XMCL_SHARED_NODE_REGION=sgp
 XMCL_CONTROL_PLANE_URL
 XMCL_CONTROL_PLANE_CREDENTIAL
 XMCL_SHARED_NODE_INGRESS_HOST
-XMCL_VULTR_OBJECT_STORAGE_ENDPOINT=https://sgp1.vultrobjects.com
-XMCL_VULTR_OBJECT_STORAGE_REGION=sgp
-XMCL_VULTR_OBJECT_STORAGE_BUCKET
+XMCL_AZURE_BLOB_ENDPOINT=https://<account>.blob.core.windows.net
+XMCL_AZURE_BLOB_CONTAINER
 XMCL_WORKSPACE_ROOT
 XMCL_STATE_ROOT
 XMCL_CONTAINER_IMAGE
@@ -85,16 +84,15 @@ release builds the agent, quota helper, fixed runtime entrypoint, and image from
 the same commit and writes `release-manifest.json` binding their hashes to the
 image digest and raw runtime-catalog SHA-256.
 
-`XMCL_VULTR_OBJECT_STORAGE_ENDPOINT` must be the Vultr HTTPS origin and
-`XMCL_VULTR_OBJECT_STORAGE_BUCKET` is used only to verify a grant's path-style
-bucket/key association. The control plane gives the agent no storage
+`XMCL_AZURE_BLOB_ENDPOINT` must be one exact Azure Blob account HTTPS origin and
+`XMCL_AZURE_BLOB_CONTAINER` is used only to verify a grant's exact
+container/key association. The control plane gives the agent no storage
 credentials. For each active v2 command lease it signs a control-plane request
 for one of `restore`, `sync`, or `publish`; the response contains only exact
 short-lived GET or PUT URLs. The agent rejects
-`XMCL_VULTR_OBJECT_STORAGE_ACCESS_KEY`,
-`XMCL_VULTR_OBJECT_STORAGE_SECRET_KEY`, and
-`XMCL_VULTR_OBJECT_STORAGE_CREDENTIAL_URL` if configured, including in
-development.
+`AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_KEY`,
+`AZURE_STORAGE_CONNECTION_STRING`, and `AZURE_CLIENT_SECRET` if configured,
+including in development.
 
 `XMCL_SHARED_NODE_INGRESS_HOST` is the provisioner-owned, reachable public DNS
 name or IPv4 address used for service connections. It must be supplied in the

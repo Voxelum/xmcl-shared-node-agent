@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -135,6 +136,60 @@ func TestDaemonRetriesTransientCommandFailure(t *testing.T) {
 	}
 	if source.calls.Load() < 2 {
 		t.Fatalf("transient next failure was not retried: %d calls", source.calls.Load())
+	}
+}
+
+type failingCommandSource struct {
+	daemonGateway
+	delivered atomic.Bool
+	command   controlplane.Command
+}
+
+func (s *failingCommandSource) Next(ctx context.Context, _ string) (controlplane.Command, error) {
+	if !s.delivered.Swap(true) {
+		return s.command, nil
+	}
+	<-ctx.Done()
+	return controlplane.Command{}, ctx.Err()
+}
+
+func TestDaemonReportsCommandProcessingFailure(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := testCommand(controlplane.RestoreAndStart, "start_1", "node_1", "assignment_1")
+	source := &failingCommandSource{
+		daemonGateway: daemonGateway{heartbeats: make(chan struct{}, 1)},
+		command:       command,
+	}
+	runtime := &fakeRuntime{startErr: errors.New("runtime unavailable")}
+	reported := make(chan error, 1)
+	daemon := Daemon{
+		NodeID: "node_1", Source: source, Reporter: source,
+		Executor: NewExecutor("node_1", store, &fakeWorkspace{}, runtime),
+		Status:   validStatus,
+		CommandFailure: func(failed controlplane.Command, err error) {
+			if failed.CommandID != command.CommandID {
+				t.Errorf("reported command = %q", failed.CommandID)
+			}
+			reported <- err
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx) }()
+	select {
+	case err := <-reported:
+		if !strings.Contains(err.Error(), "runtime unavailable") {
+			t.Fatalf("reported error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("command processing failure was not reported")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

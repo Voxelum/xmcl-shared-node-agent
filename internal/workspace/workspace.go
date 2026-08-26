@@ -1,5 +1,5 @@
 // Package workspace implements the v2 immutable workspace manifest protocol.
-// Bytes move only through exact command-bound grants; this package has no S3
+// Bytes move only through exact command-bound grants; this package has no Azure
 // credentials, list, stat, or delete operation.
 package workspace
 
@@ -31,7 +31,7 @@ const (
 	maxManifestBytes  int64 = 1 << 20
 	maxWorkspaceBytes int64 = 64 << 30
 	// v2 intentionally uses one immutable PUT per archive rather than general
-	// multipart credentials, so archive creation stays below S3 multipart limits.
+	// multipart credentials, so archive creation stays below single-blob limits.
 	maxBlobBytes           int64 = 4 << 30
 	maxArchiveEntries            = 100_000
 	worldTargetBytes       int64 = 192 << 20

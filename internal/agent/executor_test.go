@@ -157,7 +157,7 @@ func TestFailedSyncRetainsActiveAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspace, runtime := &fakeWorkspace{syncErr: errors.New("S3 unavailable")}, &fakeRuntime{}
+	workspace, runtime := &fakeWorkspace{syncErr: errors.New("Azure Blob unavailable")}, &fakeRuntime{}
 	executor := NewExecutor("node_1", store, workspace, runtime)
 	start := testCommand(controlplane.RestoreAndStart, "start_1", "node_1", "assignment_1")
 	if _, err := executor.Execute(context.Background(), start); err != nil {
@@ -224,7 +224,7 @@ func TestDaemonDoesNotReportStopBeforeSuccessfulSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspace, runtime := &fakeWorkspace{syncErr: errors.New("S3 unavailable")}, &fakeRuntime{}
+	workspace, runtime := &fakeWorkspace{syncErr: errors.New("Azure Blob unavailable")}, &fakeRuntime{}
 	gateway := controlplane.NewMemoryGateway(1)
 	executor := NewExecutor("node_1", store, workspace, runtime)
 	daemon := Daemon{NodeID: "node_1", Source: gateway, Reporter: gateway, Executor: executor}
