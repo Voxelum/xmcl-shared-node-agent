@@ -71,7 +71,7 @@ jobs:
                . /etc/xmcl-lightnode-bootstrap-runner.env
                set +a
                job_root=\"\$XMCL_LIGHTNODE_RUNNER_STATE_ROOT/jobs/$JOB_ID\"
-               export XMCL_LIGHTNODE_HOST=\$(jq -r .address \"\$job_root/request.json\")
+               export XMCL_LIGHTNODE_HOST=\$(sed -n 's/.*\"address\":\"\\([^\"]*\\)\".*/\\1/p' \"\$job_root/request.json\")
                export XMCL_LIGHTNODE_PORT=\"\$XMCL_LIGHTNODE_SSH_PORT\"
                export XMCL_LIGHTNODE_USER=\"\$XMCL_LIGHTNODE_SSH_USER\"
                export XMCL_LIGHTNODE_PRIVATE_KEY
