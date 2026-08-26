@@ -18,6 +18,7 @@ on:
         options:
           - status
           - approve
+          - resume
           - diagnose
           - inspect-packages
       fingerprint:
@@ -35,7 +36,7 @@ jobs:
   operate:
     runs-on: ubuntu-latest
     environment: staging
-    timeout-minutes: 5
+    timeout-minutes: 35
     steps:
       - name: Prepare strict SSH identity
         env:
@@ -60,13 +61,27 @@ jobs:
         run: |
           [[ "$JOB_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]]
           [[ "$ACTION" == status || "$ACTION" == approve ||
-             "$ACTION" == diagnose || "$ACTION" == inspect-packages ]]
+             "$ACTION" == resume || "$ACTION" == diagnose ||
+             "$ACTION" == inspect-packages ]]
           if [[ "$ACTION" == approve ]]; then
             [[ "$FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
           else
             test -z "$FINGERPRINT"
           fi
-          if [[ "$ACTION" == inspect-packages ]]; then
+          if [[ "$ACTION" == resume ]]; then
+            ssh -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes "root@$HOST" \
+              "set -a
+               . /etc/xmcl-lightnode-bootstrap-runner.env
+               set +a
+               job_root=\"\$XMCL_LIGHTNODE_RUNNER_STATE_ROOT/jobs/$JOB_ID\"
+               curl --fail-with-body --silent --show-error \
+                 --header \"Authorization: Bearer \$XMCL_LIGHTNODE_RUNNER_SECRET\" \
+                 --header 'Content-Type: application/json' \
+                 --request POST \
+                 --data-binary @\"\$job_root/request.json\" \
+                 'http://127.0.0.1:8088/v1/bootstrap-jobs'"
+          elif [[ "$ACTION" == inspect-packages ]]; then
             ssh -o BatchMode=yes -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes "root@$HOST" \
               "set -a
