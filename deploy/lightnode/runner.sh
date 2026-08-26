@@ -101,7 +101,7 @@ case "$mode" in
       /run/xmcl-shared-node-agent.service 0644
 
     ssh "${ssh_options[@]}" "$target" \
-      "sudo -n /run/xmcl-lightnode-bootstrap /run/xmcl-lightnode-bootstrap.env /run/xmcl-shared-node-agent.service"
+      "sudo -n /bin/bash /run/xmcl-lightnode-bootstrap /run/xmcl-lightnode-bootstrap.env /run/xmcl-shared-node-agent.service"
     ;;
   *)
     fail "usage: runner.sh probe|apply"
