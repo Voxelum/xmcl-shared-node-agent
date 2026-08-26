@@ -25,6 +25,12 @@ func (testQuota) Apply(context.Context, string, int64) error { return nil }
 func (testQuota) Prepare(context.Context, string) error      { return nil }
 func (testQuota) Seal(context.Context, string) error         { return nil }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
 type memoryTransfer struct {
 	objects  map[string][]byte
 	uploaded []string
@@ -612,6 +618,69 @@ func TestDirectTransferRecognizesAzureImmutableConflict(t *testing.T) {
 	}
 	if !isAlreadyExistsResponse(response) {
 		t.Fatal("Azure immutable conflict was not recognized")
+	}
+}
+
+func TestDirectTransferVerifiesAzureImmutableConflict(t *testing.T) {
+	key := "shared-hosting/a/s/revisions/1/manifest.json"
+	expected := []byte("expected immutable bytes")
+	for name, existing := range map[string][]byte{
+		"matching":   expected,
+		"mismatched": []byte("different immutable bytes"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var methods []string
+			client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				methods = append(methods, request.Method)
+				if request.Method == http.MethodPut {
+					return &http.Response{
+						StatusCode: http.StatusConflict,
+						Header:     http.Header{"X-Ms-Error-Code": {"BlobAlreadyExists"}},
+						Body:       io.NopCloser(strings.NewReader("")),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					ContentLength: int64(len(existing)),
+					Body:          io.NopCloser(bytes.NewReader(existing)),
+				}, nil
+			})}
+			transfer, err := NewDirectTransfer(
+				"https://xmclstaging.blob.core.windows.net",
+				"bucket",
+				client,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			grant := controlplane.WorkspaceGrant{
+				Key: key, Method: "PUT",
+				URL:       "https://xmclstaging.blob.core.windows.net/bucket/" + key + "?sp=rcw&sig=opaque",
+				ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339),
+				Headers: map[string]string{
+					"If-None-Match": "*", "x-ms-blob-type": "BlockBlob",
+				},
+			}
+			result, uploadErr := transfer.Upload(
+				t.Context(),
+				grant,
+				key,
+				bytes.NewReader(expected),
+				int64(len(expected)),
+				digest(expected),
+			)
+			if name == "matching" {
+				if uploadErr != nil || result.Size != int64(len(expected)) ||
+					result.SHA256 != digest(expected) {
+					t.Fatalf("matching reuse = %#v, %v", result, uploadErr)
+				}
+			} else if uploadErr == nil {
+				t.Fatal("mismatched immutable object was reused")
+			}
+			if strings.Join(methods, ",") != "PUT,GET" {
+				t.Fatalf("methods = %v", methods)
+			}
+		})
 	}
 }
 

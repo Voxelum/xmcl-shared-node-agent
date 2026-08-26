@@ -58,13 +58,17 @@ For the current authenticated command and lease only, the control plane issues
 10-minute (maximum 15-minute) pre-signed URLs:
 
 - restore: GET for its manifest, then GET only for descriptors recorded in it;
-- sync: PUT only for validated blobs for `revision + 1`;
-- publish: PUT only for that revision's `manifest.json`.
+- sync: immutable PUT for validated blobs for `revision + 1`;
+- publish: immutable PUT for that revision's `manifest.json`.
 
-PUT URLs require `If-None-Match: *` and `x-ms-blob-type: BlockBlob`. Agents
-neither list nor delete objects; the control plane does not proxy workspace
-bytes. Grant the control-plane identity only the Azure Blob Data Contributor
-actions needed for this isolated container and prefer user-delegation SAS over
+PUT URLs require `If-None-Match: *`, `x-ms-blob-type: BlockBlob`, and read
+permission for the same exact object. If Azure reports that the immutable blob
+already exists, the agent downloads that object through the same short-lived
+SAS and verifies its length and SHA-256 before reuse. A mismatch fails the sync;
+an arbitrary `409 BlobAlreadyExists` is never success-shaped. Agents neither
+list nor delete objects; the control plane does not proxy workspace bytes.
+Grant the control-plane identity only the Azure Blob Data Contributor actions
+needed for this isolated container and prefer user-delegation SAS over
 account-key SAS. Do not grant node identities an Azure role, key, or identity.
 
 ## Required staging validation

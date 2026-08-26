@@ -96,7 +96,7 @@ func (t *DirectTransfer) Upload(ctx context.Context, grant controlplane.Workspac
 	}
 	defer response.Body.Close()
 	if isAlreadyExistsResponse(response) {
-		return TransferResult{}, ErrAlreadyExists
+		return t.verifyExisting(ctx, grant.URL, size, expectedSHA256)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return TransferResult{}, fmt.Errorf("direct PUT returned HTTP %d", response.StatusCode)
@@ -105,6 +105,29 @@ func (t *DirectTransfer) Upload(ctx context.Context, grant controlplane.Workspac
 		return TransferResult{}, errors.New("direct upload source does not match descriptor")
 	}
 	return TransferResult{Size: reader.size, SHA256: expectedSHA256}, nil
+}
+
+func (t *DirectTransfer) verifyExisting(ctx context.Context, objectURL string, size int64, expectedSHA256 string) (TransferResult, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, objectURL, nil)
+	if err != nil {
+		return TransferResult{}, fmt.Errorf("create immutable reuse GET request: %w", err)
+	}
+	response, err := t.client.Do(request)
+	if err != nil {
+		return TransferResult{}, fmt.Errorf("send immutable reuse GET request: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return TransferResult{}, fmt.Errorf("immutable reuse GET returned HTTP %d", response.StatusCode)
+	}
+	if response.ContentLength > size {
+		return TransferResult{}, errors.New("existing immutable object does not match descriptor")
+	}
+	result, err := copyAndHash(io.Discard, response.Body, size)
+	if err != nil || result.Size != size || result.SHA256 != expectedSHA256 {
+		return TransferResult{}, errors.New("existing immutable object does not match descriptor")
+	}
+	return result, nil
 }
 
 func isAlreadyExistsResponse(response *http.Response) bool {
