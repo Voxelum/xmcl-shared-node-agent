@@ -19,6 +19,7 @@ on:
           - status
           - approve
           - diagnose
+          - inspect-packages
       fingerprint:
         description: Required SHA256 fingerprint for approval
         required: false
@@ -58,13 +59,32 @@ jobs:
           APPROVAL_SECRET: ${{ secrets.LIGHTNODE_RUNNER_APPROVAL_SECRET }}
         run: |
           [[ "$JOB_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]]
-          [[ "$ACTION" == status || "$ACTION" == approve || "$ACTION" == diagnose ]]
+          [[ "$ACTION" == status || "$ACTION" == approve ||
+             "$ACTION" == diagnose || "$ACTION" == inspect-packages ]]
           if [[ "$ACTION" == approve ]]; then
             [[ "$FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
           else
             test -z "$FINGERPRINT"
           fi
-          if [[ "$ACTION" == diagnose ]]; then
+          if [[ "$ACTION" == inspect-packages ]]; then
+            ssh -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes "root@$HOST" \
+              "set -a
+               . /etc/xmcl-lightnode-bootstrap-runner.env
+               set +a
+               job_root=\"\$XMCL_LIGHTNODE_RUNNER_STATE_ROOT/jobs/$JOB_ID\"
+               node_host=\$(sed -n 's/.*\"address\":\"\\([^\"]*\\)\".*/\\1/p' \"\$job_root/request.json\")
+               ssh -p \"\$XMCL_LIGHTNODE_SSH_PORT\" \
+                 -i \"\$XMCL_LIGHTNODE_PRIVATE_KEY\" \
+                 -o BatchMode=yes \
+                 -o IdentitiesOnly=yes \
+                 -o PasswordAuthentication=no \
+                 -o KbdInteractiveAuthentication=no \
+                 -o StrictHostKeyChecking=yes \
+                 -o UserKnownHostsFile=\"\$job_root/known_hosts\" \
+                 \"\$XMCL_LIGHTNODE_SSH_USER@\$node_host\" \
+                 'apt-cache policy docker.io'"
+          elif [[ "$ACTION" == diagnose ]]; then
             ssh -o BatchMode=yes -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes "root@$HOST" \
               "set -a
