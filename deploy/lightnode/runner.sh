@@ -20,7 +20,11 @@ required XMCL_LIGHTNODE_PORT
   fail "XMCL_LIGHTNODE_PORT is invalid"
 
 mode="${1:-}"
-host_pattern="[$XMCL_LIGHTNODE_HOST]:$XMCL_LIGHTNODE_PORT"
+if [[ "$XMCL_LIGHTNODE_PORT" == 22 ]]; then
+  host_pattern="$XMCL_LIGHTNODE_HOST"
+else
+  host_pattern="[$XMCL_LIGHTNODE_HOST]:$XMCL_LIGHTNODE_PORT"
+fi
 case "$mode" in
   probe)
     # This phase sends no key, token, config, or command. Persist the complete

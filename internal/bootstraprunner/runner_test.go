@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,9 +14,10 @@ import (
 )
 
 type fakeExecutor struct {
-	probes  int
-	applies int
-	env     string
+	probes   int
+	applies  int
+	env      string
+	applyErr error
 }
 
 func (e *fakeExecutor) Probe(context.Context, string) (string, string, error) {
@@ -28,6 +30,9 @@ func (e *fakeExecutor) Apply(_ context.Context, _, _, _ string, envPath string) 
 	e.applies++
 	value, err := os.ReadFile(envPath)
 	e.env = string(value)
+	if err == nil {
+		err = e.applyErr
+	}
 	return err
 }
 
@@ -133,9 +138,59 @@ func TestRunnerRejectsChangedIdempotentPayload(t *testing.T) {
 	}
 }
 
+func TestRunnerPersistsApplyFailureForOperatorStatus(t *testing.T) {
+	executor := &fakeExecutor{applyErr: errors.New("docker package unavailable")}
+	root := t.TempDir()
+	handler, err := NewHandler(
+		root,
+		string(bytes.Repeat([]byte("r"), 32)),
+		string(bytes.Repeat([]byte("a"), 32)),
+		executor,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	input := validRequest()
+	_ = post(t, server.URL+"/v1/bootstrap-jobs", input, "r")
+	_ = post(
+		t,
+		server.URL+"/v1/bootstrap-jobs/"+input.JobID+"/approve",
+		map[string]string{
+			"fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		},
+		"a",
+	)
+	failed := post(t, server.URL+"/v1/bootstrap-jobs", input, "r")
+	if failed.Code != http.StatusServiceUnavailable {
+		t.Fatalf("apply failure status = %d", failed.Code)
+	}
+	status := post(
+		t,
+		server.URL+"/v1/bootstrap-jobs/"+input.JobID+"/status",
+		nil,
+		"a",
+	)
+	if status.Status != "approved" ||
+		status.LastError != "docker package unavailable" {
+		t.Fatalf("failure status response = %#v", status)
+	}
+	info, err := os.Stat(
+		filepath.Join(root, "jobs", input.JobID, "apply-error.log"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+		t.Fatalf("apply error persistence mode = %v", info.Mode().Perm())
+	}
+}
+
 type response struct {
 	Code             int
 	Status           string
+	LastError        string
 	Fingerprint      string
 	InstanceID       string
 	Address          string
@@ -161,6 +216,7 @@ func post(t *testing.T, url string, body any, secretByte string) response {
 	defer result.Body.Close()
 	var payload struct {
 		Status           string           `json:"status"`
+		LastError        string           `json:"lastError"`
 		Fingerprint      string           `json:"fingerprint"`
 		InstanceID       string           `json:"instanceId"`
 		Address          string           `json:"address"`
@@ -169,6 +225,7 @@ func post(t *testing.T, url string, body any, secretByte string) response {
 	_ = json.NewDecoder(result.Body).Decode(&payload)
 	return response{
 		Code: result.StatusCode, Status: payload.Status,
+		LastError:   payload.LastError,
 		Fingerprint: payload.Fingerprint,
 		InstanceID:  payload.InstanceID, Address: payload.Address,
 		ExpectedProvider: payload.ExpectedProvider,

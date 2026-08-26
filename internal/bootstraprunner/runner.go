@@ -201,7 +201,19 @@ func (h *Handler) createOrResume(w http.ResponseWriter, r *http.Request) {
 		r.Context(), input.Address, knownHostsPath,
 		strings.TrimSpace(string(fingerprintBytes)), envPath,
 	); err != nil {
+		if writePrivate(
+			filepath.Join(jobDir, "apply-error.log"),
+			[]byte(err.Error()+"\n"),
+		) != nil {
+			http.Error(w, "runner_unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "apply_failed", http.StatusServiceUnavailable)
+		return
+	}
+	if err := os.Remove(filepath.Join(jobDir, "apply-error.log")); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		http.Error(w, "runner_unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if err := writePrivate(filepath.Join(jobDir, "completed"), []byte("completed\n")); err != nil {
@@ -271,17 +283,25 @@ func (h *Handler) status(w http.ResponseWriter, jobID string) {
 	} else if exists(filepath.Join(jobDir, "approved")) {
 		state = "approved"
 	}
+	lastError := ""
+	if value, err := os.ReadFile(filepath.Join(jobDir, "apply-error.log")); err == nil {
+		lastError = strings.TrimSpace(string(value))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		http.Error(w, "runner_unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		JobID            string           `json:"jobId"`
 		Status           string           `json:"status"`
+		LastError        string           `json:"lastError,omitempty"`
 		Fingerprint      string           `json:"fingerprint"`
 		NodeID           string           `json:"nodeId"`
 		InstanceID       string           `json:"instanceId"`
 		Address          string           `json:"address"`
 		ExpectedProvider ExpectedProvider `json:"expectedProvider"`
 	}{
-		JobID: jobID, Status: state,
+		JobID: jobID, Status: state, LastError: lastError,
 		Fingerprint: strings.TrimSpace(string(fingerprintBytes)),
 		NodeID:      request.NodeID, InstanceID: request.InstanceID,
 		Address: request.Address, ExpectedProvider: request.ExpectedProvider,
