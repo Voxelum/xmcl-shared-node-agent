@@ -18,6 +18,7 @@ on:
         options:
           - status
           - approve
+          - diagnose
       fingerprint:
         description: Required SHA256 fingerprint for approval
         required: false
@@ -57,13 +58,30 @@ jobs:
           APPROVAL_SECRET: ${{ secrets.LIGHTNODE_RUNNER_APPROVAL_SECRET }}
         run: |
           [[ "$JOB_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]]
-          [[ "$ACTION" == status || "$ACTION" == approve ]]
+          [[ "$ACTION" == status || "$ACTION" == approve || "$ACTION" == diagnose ]]
           if [[ "$ACTION" == approve ]]; then
             [[ "$FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
           else
             test -z "$FINGERPRINT"
           fi
-          if [[ "$ACTION" == approve ]]; then
+          if [[ "$ACTION" == diagnose ]]; then
+            ssh -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes "root@$HOST" \
+              "set -a
+               . /etc/xmcl-lightnode-bootstrap-runner.env
+               set +a
+               job_root=\"\$XMCL_LIGHTNODE_RUNNER_STATE_ROOT/jobs/$JOB_ID\"
+               export XMCL_LIGHTNODE_HOST=\$(jq -r .address \"\$job_root/request.json\")
+               export XMCL_LIGHTNODE_PORT=\"\$XMCL_LIGHTNODE_SSH_PORT\"
+               export XMCL_LIGHTNODE_USER=\"\$XMCL_LIGHTNODE_SSH_USER\"
+               export XMCL_LIGHTNODE_PRIVATE_KEY
+               export XMCL_LIGHTNODE_KNOWN_HOSTS=\"\$job_root/known_hosts\"
+               export XMCL_LIGHTNODE_HOST_KEY_SHA256=\$(cat \"\$job_root/fingerprint\")
+               export XMCL_LIGHTNODE_BOOTSTRAP_ENV=\"\$job_root/bootstrap.env\"
+               export XMCL_LIGHTNODE_BOOTSTRAP_SCRIPT
+               export XMCL_LIGHTNODE_AGENT_SERVICE
+               \"\$XMCL_LIGHTNODE_RUNNER_SCRIPT\" apply"
+          elif [[ "$ACTION" == approve ]]; then
             printf '%s\n' "$APPROVAL_SECRET" |
               ssh -o BatchMode=yes -o IdentitiesOnly=yes \
                 -o StrictHostKeyChecking=yes "root@$HOST" \
