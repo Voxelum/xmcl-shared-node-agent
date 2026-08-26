@@ -26,6 +26,7 @@ import (
 
 const cpuPeriod int64 = 100000
 const privateNetwork = "xmcl-shared-private"
+const masqueradeOption = "com.docker.network.bridge.enable_ip_masquerade"
 const runtimeCatalogLabel = "io.xmcl.runtime-catalog-sha256"
 
 const (
@@ -68,16 +69,28 @@ func (r *Runtime) Validate(ctx context.Context) error {
 	if err := ValidateRuntimeCatalogLabels(image.Config.Labels); err != nil {
 		return err
 	}
-	if _, err := r.client.NetworkInspect(ctx, privateNetwork, network.InspectOptions{}); err != nil {
+	configuredNetwork, err := r.client.NetworkInspect(ctx, privateNetwork, network.InspectOptions{})
+	if err != nil {
 		if !errdefs.IsNotFound(err) {
 			return fmt.Errorf("inspect private container network: %w", err)
 		}
 		if _, err := r.client.NetworkCreate(ctx, privateNetwork, network.CreateOptions{
-			Driver:   "bridge",
-			Internal: true,
+			Driver: "bridge",
+			Options: map[string]string{
+				masqueradeOption: "false",
+			},
 		}); err != nil {
 			return fmt.Errorf("create private container network: %w", err)
 		}
+	} else if err := validatePrivateNetwork(configuredNetwork); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validatePrivateNetwork(configured network.Inspect) error {
+	if configured.Internal || configured.Options[masqueradeOption] != "false" {
+		return errors.New("private container network must permit published ingress without outbound masquerading")
 	}
 	return nil
 }

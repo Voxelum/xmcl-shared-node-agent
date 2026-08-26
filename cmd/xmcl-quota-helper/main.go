@@ -37,7 +37,7 @@ func execute(
 	args []string,
 	runQuota func(config, string) error,
 	identity func(config) (int, int, error),
-	transition func(string, int, int) error,
+	transition func(string, int, int, os.FileMode, os.FileMode) error,
 ) error {
 	if len(args) == 1 && args[0] == "check" {
 		return runQuota(config, "state")
@@ -53,9 +53,9 @@ func execute(
 			return err
 		}
 		if args[0] == "prepare" {
-			return transition(directory, 1000, 1000)
+			return transition(directory, 1000, gid, 0o750, 0o640)
 		}
-		return transition(directory, uid, gid)
+		return transition(directory, uid, gid, 0o700, 0o600)
 	}
 	if len(args) != 5 || args[0] != "apply" || args[1] != "--directory" || args[3] != "--gib" {
 		return errors.New("invalid quota helper arguments")
@@ -147,7 +147,11 @@ func agentIdentity(config config) (int, int, error) {
 // transitionOwnership runs only after the direct-child check above. Docker is
 // stopped before sealing, so no untrusted process can race this walk. Symlinks
 // and special files are rejected instead of followed or changed.
-func transitionOwnership(directory string, uid, gid int) error {
+func transitionOwnership(
+	directory string,
+	uid, gid int,
+	directoryMode, fileMode os.FileMode,
+) error {
 	return filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -163,9 +167,9 @@ func transitionOwnership(directory string, uid, gid int) error {
 			return err
 		}
 		if info.IsDir() {
-			return os.Chmod(path, 0o700)
+			return os.Chmod(path, directoryMode)
 		}
-		return os.Chmod(path, 0o600)
+		return os.Chmod(path, fileMode)
 	})
 }
 

@@ -59,9 +59,10 @@ func (q *Helper) Apply(ctx context.Context, directory string, gib int64) error {
 	return q.run(ctx, q.Path, "apply", "--directory", directory, "--gib", strconv.FormatInt(gib, 10))
 }
 
-// Prepare grants UID/GID 1000 access only to its direct bind-mounted
-// workspace. The root-owned helper performs the ownership transition without
-// giving the node agent broad storage privileges.
+// Prepare grants container UID 1000 ownership of its direct bind-mounted
+// workspace while retaining read-only group access for the trusted node agent.
+// The root-owned helper performs the transition without granting access to
+// other host users.
 func (q *Helper) Prepare(ctx context.Context, directory string) error {
 	if err := q.validateDirectory(directory); err != nil {
 		return err

@@ -20,21 +20,25 @@ func TestExecuteTerminalCommandsDoNotFallThrough(t *testing.T) {
 		AgentUser:     "xmcl-agent",
 	}
 	tests := []struct {
-		name       string
-		args       []string
-		wantUID    int
-		wantGID    int
-		wantQuota  string
-		transition bool
+		name         string
+		args         []string
+		wantUID      int
+		wantGID      int
+		wantDirMode  os.FileMode
+		wantFileMode os.FileMode
+		wantQuota    string
+		transition   bool
 	}{
 		{name: "check", args: []string{"check"}, wantQuota: "state"},
 		{
 			name: "prepare", args: []string{"prepare", "--directory", service},
-			wantUID: 1000, wantGID: 1000, transition: true,
+			wantUID: 1000, wantGID: 3000, wantDirMode: 0o750,
+			wantFileMode: 0o640, transition: true,
 		},
 		{
 			name: "seal", args: []string{"seal", "--directory", service},
-			wantUID: 2000, wantGID: 3000, transition: true,
+			wantUID: 2000, wantGID: 3000, wantDirMode: 0o700,
+			wantFileMode: 0o600, transition: true,
 		},
 	}
 	for _, test := range tests {
@@ -52,10 +56,14 @@ func TestExecuteTerminalCommandsDoNotFallThrough(t *testing.T) {
 					return nil
 				},
 				func(config) (int, int, error) { return 2000, 3000, nil },
-				func(path string, uid, gid int) error {
+				func(path string, uid, gid int, directoryMode, fileMode os.FileMode) error {
 					transitionCalls++
-					if path != service || uid != test.wantUID || gid != test.wantGID {
-						t.Fatalf("transition = %q %d:%d", path, uid, gid)
+					if path != service || uid != test.wantUID || gid != test.wantGID ||
+						directoryMode != test.wantDirMode || fileMode != test.wantFileMode {
+						t.Fatalf(
+							"transition = %q %d:%d %04o/%04o",
+							path, uid, gid, directoryMode, fileMode,
+						)
 					}
 					return nil
 				},

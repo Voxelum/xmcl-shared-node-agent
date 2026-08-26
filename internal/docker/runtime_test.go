@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/docker/api/types/network"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
 	runtimecontract "github.com/voxelum/xmcl-shared-node-agent/internal/runtime"
 )
@@ -22,6 +23,24 @@ func TestRuntimeImageRequiresMatchingCatalogLabel(t *testing.T) {
 		if err := ValidateRuntimeCatalogLabels(labels); err == nil {
 			t.Fatal("runtime image with a missing or mismatched catalog label was accepted")
 		}
+	}
+}
+
+func TestPrivateNetworkAllowsIngressWithoutOutboundMasquerading(t *testing.T) {
+	configured := network.Inspect{
+		Options: map[string]string{masqueradeOption: "false"},
+	}
+	if err := validatePrivateNetwork(configured); err != nil {
+		t.Fatal(err)
+	}
+	configured.Internal = true
+	if err := validatePrivateNetwork(configured); err == nil {
+		t.Fatal("internal Docker network unexpectedly accepted")
+	}
+	configured.Internal = false
+	configured.Options[masqueradeOption] = "true"
+	if err := validatePrivateNetwork(configured); err == nil {
+		t.Fatal("outbound masquerading unexpectedly accepted")
 	}
 }
 
