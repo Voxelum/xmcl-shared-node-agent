@@ -187,6 +187,9 @@ func setCanonicalEnvironment(t *testing.T) {
 		"XMCL_METRICS_ADDR":                        "127.0.0.1:9464",
 		"OTEL_EXPORTER_OTLP_ENDPOINT":              "",
 		"OTEL_EXPORTER_OTLP_HEADERS":               "",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":       "",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS":       "",
+		"OTEL_EXPORTER_OTLP_INSECURE":              "",
 	} {
 		t.Setenv(name, value)
 	}
