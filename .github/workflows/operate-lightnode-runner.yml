@@ -21,6 +21,7 @@ on:
           - resume
           - diagnose
           - inspect-packages
+          - inspect-node
       fingerprint:
         description: Required SHA256 fingerprint for approval
         required: false
@@ -62,7 +63,7 @@ jobs:
           [[ "$JOB_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]]
           [[ "$ACTION" == status || "$ACTION" == approve ||
              "$ACTION" == resume || "$ACTION" == diagnose ||
-             "$ACTION" == inspect-packages ]]
+             "$ACTION" == inspect-packages || "$ACTION" == inspect-node ]]
           if [[ "$ACTION" == approve ]]; then
             [[ "$FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
           else
@@ -81,7 +82,7 @@ jobs:
                  --request POST \
                  --data-binary @\"\$job_root/request.json\" \
                  'http://127.0.0.1:8088/v1/bootstrap-jobs'"
-          elif [[ "$ACTION" == inspect-packages ]]; then
+          elif [[ "$ACTION" == inspect-packages || "$ACTION" == inspect-node ]]; then
             ssh -o BatchMode=yes -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes "root@$HOST" \
               "set -a
@@ -98,7 +99,14 @@ jobs:
                  -o StrictHostKeyChecking=yes \
                  -o UserKnownHostsFile=\"\$job_root/known_hosts\" \
                  \"\$XMCL_LIGHTNODE_SSH_USER@\$node_host\" \
-                 'apt-cache policy docker.io'"
+                 'if [[ \"$ACTION\" == inspect-packages ]]; then
+                    apt-cache policy docker.io
+                  else
+                    systemctl status --no-pager xmcl-shared-node-agent || true
+                    journalctl --no-pager -u xmcl-shared-node-agent -n 100
+                    findmnt --target /var/lib/xmcl-shared
+                    docker --version
+                  fi'"
           elif [[ "$ACTION" == diagnose ]]; then
             ssh -o BatchMode=yes -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes "root@$HOST" \
