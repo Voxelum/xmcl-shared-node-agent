@@ -105,6 +105,10 @@ jobs:
                     systemctl status --no-pager xmcl-shared-node-agent || true
                     journalctl --no-pager -u xmcl-shared-node-agent -n 100
                     findmnt --target /var/lib/xmcl-shared
+                    namei -l /var/lib/xmcl-shared/state/control-plane-credential
+                    stat -c \"%U:%G %a %n\" \
+                      /var/lib/xmcl-shared/state \
+                      /var/lib/xmcl-shared/state/control-plane-credential
                     docker --version
                   fi'"
           elif [[ "$ACTION" == diagnose ]]; then
