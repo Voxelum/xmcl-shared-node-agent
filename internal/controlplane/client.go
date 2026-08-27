@@ -36,6 +36,7 @@ type Client struct {
 	nonce               func() (string, error)
 	pollInterval        time.Duration
 
+	authMu     sync.RWMutex
 	mu         sync.RWMutex
 	credential string
 	expiresAt  string
@@ -181,7 +182,9 @@ func (c *Client) CredentialNeedsRotation() bool {
 // short-lived credential. It must be called before expiry; it never falls back
 // to the consumed bootstrap credential.
 func (c *Client) RotateCredential(ctx context.Context) error {
-	response, err := c.sendNode(
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	response, err := c.sendNodeLocked(
 		ctx,
 		"/v1/internal/shared-nodes/"+c.nodeID+"/credentials:rotate",
 		nil,
@@ -459,6 +462,12 @@ func (c *Client) workspaceGrants(ctx context.Context, operation string, command 
 }
 
 func (c *Client) sendNode(ctx context.Context, path string, body []byte) ([]byte, error) {
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+	return c.sendNodeLocked(ctx, path, body)
+}
+
+func (c *Client) sendNodeLocked(ctx context.Context, path string, body []byte) ([]byte, error) {
 	c.mu.RLock()
 	credential := c.credential
 	c.mu.RUnlock()

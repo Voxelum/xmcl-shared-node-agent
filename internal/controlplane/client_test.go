@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -298,6 +299,81 @@ func TestClientRotatesPersistedCredentialBeforeExpiry(t *testing.T) {
 	if err != nil || !strings.Contains(string(data), `"credential":"node-1.second"`) ||
 		!strings.Contains(string(data), `"expiresAt":"2026-01-01T00:30:00Z"`) {
 		t.Fatalf("persisted rotated credential = %q, %v", data, err)
+	}
+}
+
+func TestClientWaitsForInflightRequestsBeforeCredentialRotation(t *testing.T) {
+	t.Parallel()
+
+	heartbeatStarted := make(chan struct{})
+	releaseHeartbeat := make(chan struct{})
+	rotationStarted := make(chan struct{})
+	var heartbeatOnce sync.Once
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/internal/shared-nodes/node-1/heartbeat":
+			if r.Header.Get("Authorization") != "SharedNode node-1.first" {
+				t.Errorf("heartbeat authorization = %q", r.Header.Get("Authorization"))
+			}
+			heartbeatOnce.Do(func() { close(heartbeatStarted) })
+			<-releaseHeartbeat
+			_, _ = w.Write([]byte(`{"accepted":true}`))
+		case "/v1/internal/shared-nodes/node-1/credentials:rotate":
+			close(rotationStarted)
+			if r.Header.Get("Authorization") != "SharedNode node-1.first" {
+				t.Errorf("rotation authorization = %q", r.Header.Get("Authorization"))
+			}
+			_, _ = w.Write([]byte(`{"nodeId":"node-1","credential":"node-1.second","expiresAt":"2026-01-01T00:30:00Z"}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "credential")
+	if err := os.WriteFile(
+		path,
+		[]byte(`{"credential":"node-1.first","expiresAt":"2026-01-01T00:10:00Z"}`+"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(ClientOptions{
+		BaseURL: server.URL, NodeID: "node-1", Region: "sgp",
+		CredentialPath: path, HTTPClient: server.Client(),
+		Now: func() time.Time {
+			return time.Date(2026, 1, 1, 0, 9, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	heartbeatResult := make(chan error, 1)
+	go func() {
+		heartbeatResult <- client.Heartbeat(t.Context(), NodeStatus{
+			ContractVersion: SharedNodeContractVersion,
+			Status:          "ready",
+			AgentVersion:    "test-agent",
+			Ingress:         Ingress{Host: "node.example"},
+		})
+	}()
+	<-heartbeatStarted
+	rotationResult := make(chan error, 1)
+	go func() { rotationResult <- client.RotateCredential(t.Context()) }()
+
+	select {
+	case <-rotationStarted:
+		t.Fatal("credential rotated while an old-credential request was in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseHeartbeat)
+	if err := <-heartbeatResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-rotationResult; err != nil {
+		t.Fatal(err)
 	}
 }
 
