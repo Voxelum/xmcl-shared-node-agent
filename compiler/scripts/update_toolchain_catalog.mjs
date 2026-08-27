@@ -57,6 +57,7 @@ function resolveRequired(value, argument) {
 }
 
 main().catch((error) => {
-  process.stderr.write(`toolchain catalog update failed: ${error.code ?? error.message}\n`);
+  const target = error.url ? ` (${error.url})` : "";
+  process.stderr.write(`toolchain catalog update failed: ${error.code ?? error.message}${target}\n`);
   process.exitCode = 1;
 });

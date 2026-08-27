@@ -1,8 +1,13 @@
 import { createCompilerHttpServer } from "./http-worker.mjs";
+import { createProductionCompilerWorker } from "./production-composition.mjs";
 
 const port = parsePort(process.env.PORT);
 const host = parseHost(process.env.HOST);
-const server = createCompilerHttpServer();
+const worker = await createProductionCompilerWorker().catch((error) => {
+  process.stderr.write(`xmcl compiler composition unavailable: ${error.message}\n`);
+  return undefined;
+});
+const server = createCompilerHttpServer(worker ? { worker } : {});
 
 server.listen(port, host, () => {
   process.stdout.write(`xmcl compiler worker listening on ${host}:${port}\n`);

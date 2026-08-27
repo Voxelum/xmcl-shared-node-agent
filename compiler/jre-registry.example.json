@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "catalogRevision": "367a6a130a8ff6c409f1e87871c2cf0c5c93671b0616fdefc64a7cdd13bb6f93",
+  "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3",
+  "roots": [
+    {
+      "id": "java-runtime-delta-21",
+      "sha256": "2b3bf58669d502aae932fc492019c1d33bc3439dce1d7951110802d55a8b427d",
+      "component": "java-runtime-delta",
+      "major": 21,
+      "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3",
+      "path": "/opt/xmcl/jres/java-runtime-delta-21"
+    }
+  ]
+}

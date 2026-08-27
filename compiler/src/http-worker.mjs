@@ -154,14 +154,8 @@ function createComposition(options, now, allowInsecureForTests) {
       !validAuthenticator(options.requestAuthenticator, allowInsecureForTests)) {
       return undefined;
     }
-    const published = new AuthenticatedCallback({
+    const callbacks = new AuthenticatedDeploymentCallbacks({
       ...options.callback,
-      now,
-      allowInsecureForTests,
-    });
-    const uploadPreparation = new AuthenticatedCallback({
-      ...options.callback,
-      url: options.callback?.uploadPreparationUrl,
       now,
       allowInsecureForTests,
     });
@@ -172,7 +166,7 @@ function createComposition(options, now, allowInsecureForTests) {
         sandboxRunner: options.sandboxAdapter,
         artifactDownloader: options.artifactDownloader,
       }),
-      callbacks: { published, uploadPreparation },
+      callbacks,
       fetchImpl: options.fetchImpl,
       requestAuthenticator: options.requestAuthenticator,
     };
@@ -184,7 +178,7 @@ function createComposition(options, now, allowInsecureForTests) {
 class CallbackBoundControlPlane {
   constructor({ callbacks, grants, now }) {
     if (typeof grants !== "function") throw new TypeError("missing exact grant provider");
-    if (!callbacks?.published || !callbacks?.uploadPreparation) {
+    if (!callbacks || typeof callbacks.post !== "function") {
       throw new TypeError("missing authenticated callbacks");
     }
     this.callbacks = callbacks;
@@ -208,7 +202,7 @@ class CallbackBoundControlPlane {
       publication.content?.key !== job.expectedContentKey) {
       throw new CompilerFailure("invalid_publication");
     }
-    await this.callbacks.published.post({
+    await this.callbacks.post("published", job.deploymentId, {
       schemaVersion: 1,
       status: "published",
       compilerRequestId: job.compilerRequestId,
@@ -226,7 +220,7 @@ class CallbackBoundControlPlane {
       publication.content?.key !== job.expectedContentKey) {
       throw new CompilerFailure("invalid_upload_preparation");
     }
-    const response = await this.callbacks.uploadPreparation.post({
+    const response = await this.callbacks.post("upload-prepared", job.deploymentId, {
       schemaVersion: 1,
       status: "upload_prepared",
       compilerRequestId: job.compilerRequestId,
@@ -245,7 +239,7 @@ class CallbackBoundControlPlane {
       !["unsupported_compatibility", "compiler_unavailable", "compiler_failed"].includes(failure.code)) {
       throw new CompilerFailure("invalid_failure_callback");
     }
-    await this.callbacks.published.post({
+    await this.callbacks.post("failed", job.deploymentId, {
       schemaVersion: 1,
       status: "failed",
       compilerRequestId: job.compilerRequestId,
@@ -256,9 +250,9 @@ class CallbackBoundControlPlane {
   }
 }
 
-class AuthenticatedCallback {
+class AuthenticatedDeploymentCallbacks {
   constructor({
-    url,
+    controlPlaneOrigin,
     authenticator,
     fetchImpl = fetch,
     now,
@@ -271,28 +265,39 @@ class AuthenticatedCallback {
     }
     let parsed;
     try {
-      parsed = new URL(url);
+      parsed = new URL(controlPlaneOrigin);
     } catch {
       throw new TypeError("invalid callback URL");
     }
-    if (!url || parsed.username || parsed.password || parsed.hash ||
+    if (!controlPlaneOrigin || parsed.username || parsed.password || parsed.hash ||
+      parsed.pathname !== "/" || parsed.search ||
       (parsed.protocol !== "https:" && !(allowInsecureForTests && parsed.protocol === "http:"))) {
-      throw new TypeError("invalid callback URL");
+      throw new TypeError("invalid control-plane origin");
     }
-    this.url = parsed.href;
-    this.target = `${parsed.pathname}${parsed.search}`;
+    this.origin = parsed.origin;
     this.authenticator = authenticator;
     this.fetch = fetchImpl;
     this.now = now;
     this.timeoutMs = timeoutMs;
   }
 
-  async post(payload) {
+  async post(kind, deploymentId, payload) {
+    const suffixes = {
+      "upload-prepared": "upload-prepared",
+      published: "published",
+      failed: "failed",
+    };
+    if (!Object.hasOwn(suffixes, kind) || !validCallbackDeploymentId(deploymentId)) {
+      throw new CompilerFailure("callback_delivery_failed");
+    }
+    const target = `/v1/internal/shared-runtime-compiler/deployments/` +
+      `${encodeURIComponent(deploymentId)}/${suffixes[kind]}`;
+    const url = `${this.origin}${target}`;
     const body = encoder.encode(JSON.stringify(payload));
     if (body.byteLength > MAX_CALLBACK_BYTES) throw new CompilerFailure("callback_payload_too_large");
     const identityHeaders = await this.authenticator.signOutgoing({
       method: "POST",
-      target: this.target,
+      target,
       body,
       now: this.now(),
     });
@@ -300,7 +305,7 @@ class AuthenticatedCallback {
     let timeout;
     try {
       const response = await Promise.race([
-        this.fetch(this.url, {
+        this.fetch(url, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -321,9 +326,10 @@ class AuthenticatedCallback {
         }),
       ]);
       if (!response?.ok || response.redirected ||
-        (response.url && new URL(response.url).href !== this.url)) {
+        (response.url && new URL(response.url).href !== url)) {
         throw new CompilerFailure("callback_delivery_failed");
       }
+
       return response;
     } catch (error) {
       if (error instanceof CompilerFailure) throw error;
@@ -335,17 +341,16 @@ class AuthenticatedCallback {
   }
 }
 
-async function parseUploadPreparation(response, job) {
-  const length = response.headers.get("content-length");
-  if (length !== null && (!/^(?:0|[1-9]\d*)$/.test(length) ||
-    Number(length) > MAX_CALLBACK_BYTES)) {
-    throw new CompilerFailure("invalid_upload_preparation");
-  }
+function validCallbackDeploymentId(value) {
+  return typeof value === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(value);
+}
+
+export async function parseUploadPreparation(response, job) {
+  const bytes = await readBoundedCallbackBody(response);
   let value;
   try {
-    const raw = await response.text();
-    if (encoder.encode(raw).byteLength > MAX_CALLBACK_BYTES) throw new Error("oversized");
-    value = JSON.parse(raw);
+    value = JSON.parse(decoder.decode(bytes));
   } catch {
     throw new CompilerFailure("invalid_upload_preparation");
   }
@@ -379,6 +384,50 @@ async function parseUploadPreparation(response, job) {
     },
     reconciliation: value.reconciliation,
   };
+}
+
+export async function readBoundedCallbackBody(response) {
+  const length = response.headers.get("content-length");
+  if (length !== null && (!/^(?:0|[1-9]\d*)$/.test(length) ||
+    Number(length) > MAX_CALLBACK_BYTES)) {
+    void response.body?.cancel("callback response too large").catch(() => undefined);
+    throw new CompilerFailure("invalid_upload_preparation");
+  }
+  const reader = response.body?.getReader?.();
+  if (!reader) throw new CompilerFailure("invalid_upload_preparation");
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) {
+        void reader.cancel("invalid callback response").catch(() => undefined);
+        throw new CompilerFailure("invalid_upload_preparation");
+      }
+      total += value.byteLength;
+      if (total > MAX_CALLBACK_BYTES) {
+        void reader.cancel("callback response too large").catch(() => undefined);
+        throw new CompilerFailure("invalid_upload_preparation");
+      }
+      chunks.push(value);
+    }
+  } catch {
+    void reader.cancel("invalid callback response").catch(() => undefined);
+    throw new CompilerFailure("invalid_upload_preparation");
+  } finally {
+    reader.releaseLock();
+  }
+  if (length !== null && total !== Number(length)) {
+    throw new CompilerFailure("invalid_upload_preparation");
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 function isReconciliationGrant(value, expectedKey) {

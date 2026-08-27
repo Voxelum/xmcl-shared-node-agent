@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { CompilerFailure } from "./bundle.mjs";
 import { catalogRevisionFor } from "./toolchain-catalog.mjs";
+import {
+  PRODUCTION_OUTPUT_LIMITS,
+  outputSizeWithinLimit,
+} from "./production-limits.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
-const MAX_OUTPUT_FILES = 16_384;
-const MAX_OUTPUT_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_OUTPUT_FILES = PRODUCTION_OUTPUT_LIMITS.maxFiles;
 const RAW_ZSTD_BLOCK_BYTES = 128 * 1024;
 
 const loaderTemplates = Object.freeze({
@@ -31,13 +34,22 @@ const requiredSandboxCapabilities = Object.freeze({
  * launcher-provided bundle and contains only exact artifact identities.
  */
 export class ReviewedToolchainCatalog {
-  constructor(document) {
+  constructor(document, { supportedFamilies } = {}) {
     const catalog = parseCatalog(document);
+    if (supportedFamilies !== undefined &&
+      (!Array.isArray(supportedFamilies) || supportedFamilies.length < 1 ||
+        new Set(supportedFamilies).size !== supportedFamilies.length ||
+        supportedFamilies.some((family) => !Object.hasOwn(loaderTemplates, family)))) {
+      throw new CompilerFailure("invalid_reviewed_catalog");
+    }
     this.catalogVersion = catalog.catalogVersion;
     this.catalogRevision = catalog.catalogRevision;
     this.runtimeCatalogRevision = catalog.runtimeCatalogRevision;
     this.approvedArtifactHosts = catalog.approvedArtifactHosts;
-    this.toolchains = catalog.toolchains;
+    this.toolchains = supportedFamilies === undefined
+      ? catalog.toolchains
+      : catalog.toolchains.filter((toolchain) => supportedFamilies.includes(toolchain.loader.kind));
+    if (this.toolchains.length < 1) throw new CompilerFailure("invalid_reviewed_catalog");
   }
 
   resolve(input) {
@@ -84,6 +96,7 @@ export class StrictArtifactDownloader {
       const download = async () => {
         const response = await this.fetchImpl(artifact.url, {
           method: "GET",
+          headers: { "accept-encoding": "identity" },
           redirect: "error",
           credentials: "omit",
           referrerPolicy: "no-referrer",
@@ -94,6 +107,10 @@ export class StrictArtifactDownloader {
         }
         if (response.url && new URL(response.url).href !== new URL(artifact.url).href) {
           throw new CompilerFailure("artifact_redirect_rejected");
+        }
+        const contentEncoding = response.headers?.get("content-encoding");
+        if (contentEncoding && contentEncoding.toLowerCase() !== "identity") {
+          throw new CompilerFailure("artifact_download_failed");
         }
         const contentLength = response.headers?.get("content-length");
         if (!/^(?:0|[1-9]\d*)$/.test(contentLength ?? "")) {
@@ -179,7 +196,11 @@ export class ReviewedRuntimeBuilder {
         sha256(bytes) !== artifact.sha256) {
         throw new CompilerFailure("artifact_hash_mismatch");
       }
-      artifacts.push({ coordinate: artifact.coordinate, bytes: bytes.slice() });
+      artifacts.push({
+        coordinate: artifact.coordinate,
+        url: artifact.url,
+        bytes,
+      });
     }
 
     let installed;
@@ -425,7 +446,7 @@ function parseToolchain(value, revision, approvedHosts) {
     !sameKeys(value, ["minecraftVersion", "loader", "java", "jre", "artifacts", "launchTemplate"]) ||
     !validMinecraftVersion(value.minecraftVersion) || !validLoader(value.loader) ||
     !validJava(value.java) || !plainObject(value.jre) ||
-    !Array.isArray(value.artifacts) || value.artifacts.length < 1 || value.artifacts.length > 16 ||
+    !Array.isArray(value.artifacts) || value.artifacts.length < 1 || value.artifacts.length > 256 ||
     value.launchTemplate !== loaderTemplates[value.loader.kind]) {
     throw new CompilerFailure("invalid_reviewed_catalog");
   }
@@ -596,12 +617,20 @@ function normalizeSandboxOutput(result) {
   if (!plainObject(result) || !validSandboxAttestation(result.attestation)) {
     throw new CompilerFailure("installer_failed");
   }
-  const files = cloneFiles(result.files);
-  for (const [path, file] of files) {
+  if (!(result.files instanceof Map) || result.files.size > MAX_OUTPUT_FILES ||
+    !outputSizeWithinLimit(
+      [...result.files.values()].map((file) => file?.bytes?.byteLength),
+      PRODUCTION_OUTPUT_LIMITS.maxSandboxBytes,
+    )) {
+    throw new CompilerFailure("invalid_installer_output");
+  }
+  const files = new Map();
+  for (const [path, file] of result.files) {
     if (!safeOutputPath(path) || forbiddenOutputPath(path) || path.startsWith(".xmcl/") ||
       !(file.bytes instanceof Uint8Array) || !Number.isSafeInteger(file.mode)) {
       throw new CompilerFailure("invalid_installer_output");
     }
+    files.set(path, { bytes: file.bytes, mode: file.mode });
   }
   return files;
 }
@@ -623,7 +652,7 @@ function copyValidatedBundleContent(files, bundle) {
       forbiddenOutputPath(outputPath) || files.has(outputPath)) {
       throw new CompilerFailure("invalid_local_content");
     }
-    files.set(outputPath, { bytes: source.slice(), mode: 0o644 });
+    files.set(outputPath, { bytes: source, mode: 0o644 });
   }
 }
 
@@ -671,7 +700,7 @@ function validateOutputFiles(files) {
   if (!(files instanceof Map) || files.size < 2 || files.size > MAX_OUTPUT_FILES) {
     throw new CompilerFailure("invalid_builder_output");
   }
-  let total = 0;
+  const sizes = [];
   const entries = [];
   for (const [path, file] of [...files.entries()].sort(([left], [right]) => comparePath(left, right))) {
     if (!safeOutputPath(path) ||
@@ -679,8 +708,7 @@ function validateOutputFiles(files) {
       !(file?.bytes instanceof Uint8Array) || !validOutputMode(file.mode)) {
       throw new CompilerFailure("invalid_builder_output");
     }
-    total += file.bytes.byteLength;
-    if (total > MAX_OUTPUT_BYTES) throw new CompilerFailure("invalid_builder_output");
+    sizes.push(file.bytes.byteLength);
     entries.push({
       path,
       sha256: sha256(file.bytes),
@@ -689,7 +717,8 @@ function validateOutputFiles(files) {
     });
   }
   if (!files.has(".xmcl/runtime.json") || !files.has(".xmcl/launch.sh") ||
-    files.get(".xmcl/launch.sh").mode !== 0o755) {
+    files.get(".xmcl/launch.sh").mode !== 0o755 ||
+    !outputSizeWithinLimit(sizes, PRODUCTION_OUTPUT_LIMITS.maxPackageInputBytes)) {
     throw new CompilerFailure("invalid_builder_output");
   }
   return entries;
@@ -724,13 +753,21 @@ function packageTar(files) {
     const padding = (512 - (file.bytes.byteLength % 512)) % 512;
     chunks.push(header, file.bytes, new Uint8Array(padding));
     total += 512 + file.bytes.byteLength + padding;
+    if (total > PRODUCTION_OUTPUT_LIMITS.maxPackageTarBytes) {
+      throw new CompilerFailure("invalid_builder_output");
+    }
   }
   chunks.push(new Uint8Array(1024));
+  if (total + 1024 > PRODUCTION_OUTPUT_LIMITS.maxPackageTarBytes) {
+    throw new CompilerFailure("invalid_builder_output");
+  }
   return concatenate(chunks, total + 1024);
 }
 
 function rawZstd(input) {
-  if (input.byteLength > 0xffffffff) throw new CompilerFailure("invalid_builder_output");
+  if (input.byteLength > PRODUCTION_OUTPUT_LIMITS.maxPackageTarBytes) {
+    throw new CompilerFailure("invalid_builder_output");
+  }
   const chunks = [Uint8Array.of(0x28, 0xb5, 0x2f, 0xfd, 0xa0, ...littleEndian32(input.byteLength))];
   let total = chunks[0].byteLength;
   for (let offset = 0; offset < input.byteLength; offset += RAW_ZSTD_BLOCK_BYTES) {
@@ -741,11 +778,15 @@ function rawZstd(input) {
     chunks.push(input.subarray(offset, offset + size));
     total += 3 + size;
   }
+  if (total > PRODUCTION_OUTPUT_LIMITS.maxPackageArchiveBytes) {
+    throw new CompilerFailure("invalid_builder_output");
+  }
   return concatenate(chunks, total);
 }
 
 function unpackDeterministicTarZst(archive) {
   if (!(archive instanceof Uint8Array) || archive.byteLength < 12 ||
+    archive.byteLength > PRODUCTION_OUTPUT_LIMITS.maxPackageArchiveBytes ||
     archive[0] !== 0x28 || archive[1] !== 0xb5 || archive[2] !== 0x2f || archive[3] !== 0xfd ||
     archive[4] !== 0xa0) {
     throw new CompilerFailure("invalid_builder_output");
@@ -801,7 +842,7 @@ function unpackTar(tar) {
       dataOffset + sizeBytes > tar.byteLength || !validOutputMode(mode)) {
       throw new CompilerFailure("invalid_builder_output");
     }
-    const bytes = tar.slice(dataOffset, dataOffset + sizeBytes);
+    const bytes = tar.subarray(dataOffset, dataOffset + sizeBytes);
     files.set(path, { bytes, sha256: sha256(bytes), sizeBytes, mode });
     offset = dataOffset + sizeBytes + ((512 - (sizeBytes % 512)) % 512);
   }
@@ -813,8 +854,8 @@ function validateEntryMetadata(entries) {
     throw new CompilerFailure("invalid_builder_output");
   }
   let previous = "";
-  let total = 0;
-  return entries.map((entry) => {
+  const sizes = [];
+  const normalized = entries.map((entry) => {
     if (!plainObject(entry) || !sameKeys(entry, ["path", "sha256", "sizeBytes", "mode"]) ||
       !safeOutputPath(entry.path) ||
       (entry.path !== ".xmcl/runtime.json" && entry.path !== ".xmcl/launch.sh" &&
@@ -825,8 +866,7 @@ function validateEntryMetadata(entries) {
       throw new CompilerFailure("invalid_builder_output");
     }
     previous = entry.path;
-    total += entry.sizeBytes;
-    if (total > MAX_OUTPUT_BYTES) throw new CompilerFailure("invalid_builder_output");
+    sizes.push(entry.sizeBytes);
     return {
       path: entry.path,
       sha256: entry.sha256.toLowerCase(),
@@ -834,6 +874,10 @@ function validateEntryMetadata(entries) {
       mode: entry.mode,
     };
   });
+  if (!outputSizeWithinLimit(sizes, PRODUCTION_OUTPUT_LIMITS.maxPackageInputBytes)) {
+    throw new CompilerFailure("invalid_builder_output");
+  }
+  return normalized;
 }
 
 function validGeneratedDescriptor(value) {
@@ -969,7 +1013,7 @@ function validLoaderVersion(value) {
 
 function validCoordinate(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 256 &&
-    /^[a-z0-9_.-]+:[a-z0-9_.-]+:[0-9A-Za-z._+-]+(?::[a-z0-9_.-]+)?$/.test(value);
+    /^[0-9A-Za-z_.-]+:[0-9A-Za-z_.-]+:[0-9A-Za-z._+-]+(?::[0-9A-Za-z_.-]+)?$/.test(value);
 }
 
 function validIdentifier(value) {

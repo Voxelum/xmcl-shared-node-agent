@@ -75,14 +75,14 @@ function toolchainFixture({
   return { toolchain, artifactBytes, jre };
 }
 
-function catalogFor(toolchains) {
+function catalogFor(toolchains, options) {
   return new ReviewedToolchainCatalog({
     schemaVersion: 1,
     catalogVersion: "review-1",
     runtimeCatalogRevision: revision,
     approvedArtifactHosts: ["toolchain.example"],
     toolchains: toolchains.map((fixture) => fixture.toolchain),
-  });
+  }, options);
 }
 
 function bundleFor(toolchain, localFiles = [{
@@ -181,6 +181,29 @@ test("unknown reviewed compatibility rejects before artifact download", async ()
   assert.deepEqual(downloader.calls, []);
 });
 
+test("production catalog restriction rejects unsupported families before download", async () => {
+  const fabric = toolchainFixture();
+  const neoforge = toolchainFixture({
+    minecraftVersion: "1.21.1",
+    kind: "neoforge",
+    version: "21.1.115",
+  });
+  const downloader = new DeterministicFakeArtifactDownloader(new Map([
+    [fabric.toolchain.artifacts[0].coordinate, fabric.artifactBytes],
+  ]));
+  const builder = new ReviewedRuntimeBuilder({
+    toolchainCatalog: catalogFor([fabric, neoforge], {
+      supportedFamilies: ["neoforge"],
+    }),
+    verifiedJres: new DeterministicFakeJreRegistry([fabric.jre, neoforge.jre]),
+    sandboxRunner: new DeterministicFakeSandboxRunner(),
+    artifactDownloader: downloader,
+  });
+  await assert.rejects(() => builder.build(buildInput(fabric)),
+    /unsupported_compatibility/);
+  assert.deepEqual(downloader.calls, []);
+});
+
 test("builder remains fail-closed without all verified production adapters", async () => {
   const fixture = toolchainFixture();
   const builder = new ReviewedRuntimeBuilder({ toolchainCatalog: catalogFor([fixture]) });
@@ -192,8 +215,9 @@ test("strict artifact downloader rejects wrong hosts, redirects, oversize payloa
   const artifact = fixture.toolchain.artifacts[0];
   let calls = 0;
   const downloader = new StrictArtifactDownloader({
-    fetchImpl: async () => {
+    fetchImpl: async (_url, options) => {
       calls += 1;
+      assert.equal(options.headers["accept-encoding"], "identity");
       return new Response(fixture.artifactBytes, {
         status: 200,
         headers: { "content-length": String(fixture.artifactBytes.byteLength) },
@@ -217,6 +241,20 @@ test("strict artifact downloader rejects wrong hosts, redirects, oversize payloa
   });
   await assert.rejects(
     () => redirected.download(artifact, { approvedHosts: ["toolchain.example"] }),
+    /artifact_download_failed/,
+  );
+
+  const encoded = new StrictArtifactDownloader({
+    fetchImpl: async () => new Response(fixture.artifactBytes, {
+      status: 200,
+      headers: {
+        "content-encoding": "gzip",
+        "content-length": String(artifact.sizeBytes),
+      },
+    }),
+  });
+  await assert.rejects(
+    () => encoded.download(artifact, { approvedHosts: ["toolchain.example"] }),
     /artifact_download_failed/,
   );
 

@@ -139,8 +139,12 @@ export function createReviewedCompilerWorker({
 }
 
 export function verifyGrantSet(grants, job, { now = Date.now(), requireUnexpired = false } = {}) {
-  if (!grants || grants.accountId !== job.accountId ||
+  if (!grants || !hasExactKeys(grants, [
+    "accountId", "serviceId", "deploymentId", "compilerRequestId",
+    "manifestSha256", "grants",
+  ]) || grants.accountId !== job.accountId ||
     grants.serviceId !== job.serviceId || grants.deploymentId !== job.deploymentId ||
+    grants.compilerRequestId !== job.compilerRequestId ||
     grants.manifestSha256 !== job.manifestSha256 || !Array.isArray(grants.grants)) {
     throw new CompilerFailure("invalid_grants");
   }
@@ -152,7 +156,7 @@ export function verifyGrantSet(grants, job, { now = Date.now(), requireUnexpired
     output.key !== job.expectedContentKey ||
     !isExactSignedGrant(input, "GET") || !isExactSignedGrant(output, "PUT") ||
     !hasExactHeaders(input.headers, {}) ||
-    !hasExactHeaders(output.headers, { "if-none-match": "*" }) ||
+    !hasExactOutputHeaders(output.headers) ||
     (requireUnexpired && (!validNow(now) || grantExpiresAt(input) <= now || grantExpiresAt(output) <= now))
   ) throw new CompilerFailure("invalid_grants");
   return { input, output };
@@ -277,6 +281,10 @@ function verifyPreparedUpload(value, job) {
 
 export function validateCompilerJob(job) {
   if (!job || typeof job !== "object" ||
+    !hasExactKeys(job, [
+      "accountId", "serviceId", "deploymentId", "compilerRequestId",
+      "manifestSha256", "expectedContentKey", "frozenManifest",
+    ]) ||
     !validKeySegment(job.accountId) || !validKeySegment(job.serviceId) ||
     !validKeySegment(job.deploymentId) || !validSha256(job.manifestSha256) ||
     !validKeySegment(job.compilerRequestId) ||
@@ -313,7 +321,12 @@ function verifyBuiltContent(built, job) {
 }
 
 function isExactSignedGrant(grant, method) {
-  return grant && grant.method === method && typeof grant.key === "string" &&
+  const keys = method === "PUT"
+    ? ["key", "method", "url", "expiresAt", "headers"]
+    : ["key", "method", "url", "expiresAt"];
+  const validKeys = hasExactKeys(grant, keys) ||
+    method === "GET" && hasExactKeys(grant, [...keys, "headers"]);
+  return validKeys && grant.method === method && typeof grant.key === "string" &&
     exactHttpsUrl(grant.url) && Number.isSafeInteger(grantExpiresAt(grant));
 }
 
@@ -351,6 +364,22 @@ function hasExactHeaders(value, expected) {
   const keys = Object.keys(expected).sort();
   return actual.length === keys.length &&
     actual.every((key, index) => key === keys[index] && value[key] === expected[key]);
+}
+
+function hasExactKeys(value, expected) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const keys = [...expected].sort();
+  return actual.length === keys.length &&
+    actual.every((key, index) => key === keys[index]);
+}
+
+function hasExactOutputHeaders(value) {
+  return hasExactHeaders(value, { "if-none-match": "*" }) ||
+    hasExactHeaders(value, {
+      "if-none-match": "*",
+      "x-ms-blob-type": "BlockBlob",
+    });
 }
 
 function exactHttpsUrl(value) {

@@ -1,8 +1,15 @@
-FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
-WORKDIR /app
+WORKDIR /opt/xmcl-compiler/app
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y bubblewrap ca-certificates util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/xmcl-compiler/workspaces /var/lib/xmcl-compiler/replay \
+    && chown -R 10001:10001 /run/xmcl-compiler /var/lib/xmcl-compiler \
+    && chmod 0700 /run/xmcl-compiler/workspaces /var/lib/xmcl-compiler/replay
 COPY --chown=10001:10001 package.json ./
 COPY --chown=10001:10001 src ./src
+COPY --chown=10001:10001 toolchain-catalog.lock.json ./
 USER 10001:10001
 ENV HOME=/nonexistent \
     NODE_ENV=production \
