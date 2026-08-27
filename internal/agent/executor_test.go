@@ -89,6 +89,39 @@ func TestCommandIDExecutesOnceAfterRestart(t *testing.T) {
 	}
 }
 
+func TestStopAndSyncCompletesWhenStartNeverReachedTheNode(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, runtime := &fakeWorkspace{}, &fakeRuntime{}
+	executor := NewExecutor("node_1", store, workspace, runtime)
+	command := testCommand(
+		controlplane.StopAndSync,
+		"stop_1",
+		"node_1",
+		"assignment_1",
+	)
+
+	result, err := executor.Execute(context.Background(), command)
+	if err != nil || result.Status != "stopped" {
+		t.Fatalf("stop phase = %#v, %v", result, err)
+	}
+	if runtime.stops != 0 {
+		t.Fatalf("missing assignment stopped a nonexistent container %d times", runtime.stops)
+	}
+	if err := executor.MarkStoppedReported(command.ServiceID, command.AssignmentID); err != nil {
+		t.Fatal(err)
+	}
+	result, err = executor.Execute(context.Background(), command)
+	if err != nil || result.Status != "stopped-and-synced" {
+		t.Fatalf("sync phase = %#v, %v", result, err)
+	}
+	if workspace.syncs != 1 {
+		t.Fatalf("empty workspace syncs = %d, want 1", workspace.syncs)
+	}
+}
+
 func TestDifferentAssignmentIsRejectedWhileServiceActive(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	if err != nil {

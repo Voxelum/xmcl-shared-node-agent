@@ -222,7 +222,13 @@ func (e *Executor) execute(ctx context.Context, command controlplane.Command) (c
 		}
 		return controlplane.CommandResult{Status: "started"}, &ActiveAssignment{AssignmentID: command.AssignmentID, Phase: "running"}, nil
 	case controlplane.StopAndSync:
-		if !exists || active.AssignmentID != command.AssignmentID {
+		if !exists {
+			return controlplane.CommandResult{Status: "stopped"}, &ActiveAssignment{
+				AssignmentID: command.AssignmentID,
+				Phase:        "stopped",
+			}, nil
+		}
+		if active.AssignmentID != command.AssignmentID {
 			return failed("stop command does not match an active assignment"), activePointer(active, exists), nil
 		}
 		if active.Phase != "stopped" {

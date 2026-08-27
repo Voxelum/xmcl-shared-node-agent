@@ -207,6 +207,25 @@ func TestSyncClassifiesV2LayersAndPublishesManifestLast(t *testing.T) {
 	}
 }
 
+func TestSyncPublishesAnEmptyWorkspaceWhenStartNeverReachedTheNode(t *testing.T) {
+	root := t.TempDir()
+	grants := &memoryGrants{}
+	transfer := &memoryTransfer{objects: make(map[string][]byte)}
+	manager := New(root, grants, transfer, testQuota{})
+	command := stopCommand()
+
+	result, err := manager.Sync(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Revision != command.Workspace.Revision+1 || result.SizeBytes != 0 {
+		t.Fatalf("empty sync result = %#v", result)
+	}
+	if len(grants.published) != 1 || grants.published[0].LogicalSize != 0 {
+		t.Fatalf("published empty manifest = %#v", grants.published)
+	}
+}
+
 func TestRestoreInitialWorldUsesOnlyTheSelectedSeed(t *testing.T) {
 	var compressed bytes.Buffer
 	writer := zip.NewWriter(&compressed)

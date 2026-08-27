@@ -410,6 +410,16 @@ func (m *Manager) Sync(ctx context.Context, command controlplane.Command) (contr
 	if err != nil {
 		return controlplane.SyncResult{}, err
 	}
+	if _, err := os.Stat(workspacePath); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(workspacePath, 0o750); err != nil {
+			return controlplane.SyncResult{}, fmt.Errorf("create empty workspace: %w", err)
+		}
+		if err := m.quota.Prepare(ctx, workspacePath); err != nil {
+			return controlplane.SyncResult{}, fmt.Errorf("prepare empty workspace ownership: %w", err)
+		}
+	} else if err != nil {
+		return controlplane.SyncResult{}, fmt.Errorf("inspect workspace: %w", err)
+	}
 	if err := m.quota.Seal(ctx, workspacePath); err != nil {
 		return controlplane.SyncResult{}, fmt.Errorf("seal stopped workspace ownership: %w", err)
 	}
