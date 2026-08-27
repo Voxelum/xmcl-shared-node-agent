@@ -122,6 +122,50 @@ func TestStopAndSyncCompletesWhenStartNeverReachedTheNode(t *testing.T) {
 	}
 }
 
+func TestRedeliveredFailedStopUsesCurrentRecoveryLogic(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := testCommand(
+		controlplane.StopAndSync,
+		"stop_1",
+		"node_1",
+		"assignment_1",
+	)
+	if err := store.Commit(
+		command.CommandID,
+		command.ServiceID,
+		controlplane.CommandResult{
+			Status:  "failed",
+			Message: "stop command does not match an active assignment",
+		},
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace, runtime := &fakeWorkspace{}, &fakeRuntime{}
+	executor := NewExecutor("node_1", store, workspace, runtime)
+	result, err := executor.Execute(context.Background(), command)
+	if err != nil || result.Status != "stopped" {
+		t.Fatalf("redelivered stop phase = %#v, %v", result, err)
+	}
+	if runtime.stops != 0 {
+		t.Fatalf("redelivered stop stopped a nonexistent container %d times", runtime.stops)
+	}
+	if err := executor.MarkStoppedReported(command.ServiceID, command.AssignmentID); err != nil {
+		t.Fatal(err)
+	}
+	result, err = executor.Execute(context.Background(), command)
+	if err != nil || result.Status != "stopped-and-synced" {
+		t.Fatalf("redelivered sync phase = %#v, %v", result, err)
+	}
+	if workspace.syncs != 1 {
+		t.Fatalf("redelivered empty workspace syncs = %d, want 1", workspace.syncs)
+	}
+}
+
 func TestDifferentAssignmentIsRejectedWhileServiceActive(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	if err != nil {

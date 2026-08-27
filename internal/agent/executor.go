@@ -87,7 +87,7 @@ func NewExecutor(nodeID string, store StateStore, workspace Workspace, runtime C
 func (e *Executor) Execute(ctx context.Context, command controlplane.Command) (controlplane.CommandResult, error) {
 	if result, ok, err := e.store.Result(command.CommandID); err != nil {
 		return controlplane.CommandResult{}, err
-	} else if ok {
+	} else if ok && result.Status != "failed" {
 		return result, nil
 	}
 
@@ -101,7 +101,7 @@ func (e *Executor) Execute(ctx context.Context, command controlplane.Command) (c
 	defer func() { _ = unlock() }()
 	if result, ok, err := e.store.Result(command.CommandID); err != nil {
 		return controlplane.CommandResult{}, err
-	} else if ok {
+	} else if ok && result.Status != "failed" {
 		return result, nil
 	}
 	result, active, executeErr := e.execute(ctx, command)
