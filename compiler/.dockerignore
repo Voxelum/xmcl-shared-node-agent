@@ -1,5 +1,6 @@
 *
 !Dockerfile
 !package.json
+!toolchain-catalog.lock.json
 !src/
 !src/**

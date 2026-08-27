@@ -19,6 +19,47 @@ function bytes(value) {
   return encoder.encode(value);
 }
 
+function zipOne(name, content) {
+  const path = bytes(name);
+  const out = [];
+  const central = [];
+  const checksum = crc32(content);
+  u32(out, 0x04034b50); u16(out, 20); u16(out, 0x800); u16(out, 0);
+  u16(out, 0); u16(out, 0); u32(out, checksum); u32(out, content.length);
+  u32(out, content.length); u16(out, path.length); u16(out, 0);
+  out.push(...path, ...content);
+  u32(central, 0x02014b50); u16(central, 20); u16(central, 20); u16(central, 0x800);
+  u16(central, 0); u16(central, 0); u16(central, 0); u32(central, checksum);
+  u32(central, content.length); u32(central, content.length); u16(central, path.length);
+  u16(central, 0); u16(central, 0); u16(central, 0); u16(central, 0); u32(central, 0);
+  u32(central, 0); central.push(...path);
+  const offset = out.length;
+  out.push(...central);
+  u32(out, 0x06054b50); u16(out, 0); u16(out, 0); u16(out, 1); u16(out, 1);
+  u32(out, central.length); u32(out, offset); u16(out, 0);
+  return Uint8Array.from(out);
+}
+
+function u16(out, value) {
+  out.push(value & 0xff, (value >>> 8) & 0xff);
+}
+
+function u32(out, value) {
+  u16(out, value & 0xffff);
+  u16(out, value >>> 16);
+}
+
+function crc32(value) {
+  let crc = 0xffffffff;
+  for (const byte of value) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc & 1) ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 function sha1(value) {
   return createHash("sha1").update(value).digest("hex");
 }
@@ -64,13 +105,49 @@ function fixtureNetwork(candidates = SUPPORTED_TOOLCHAIN_CANDIDATES) {
         majorVersion: candidate.java.major,
       };
     }
-    const metadataBytes = bytes(JSON.stringify(metadata));
-    versions.push({ id: candidate.minecraftVersion, url: versionUrl, sha1: sha1(metadataBytes) });
-    responses.set(versionUrl, response(metadataBytes));
     responses.set(metadata.downloads.server.url, response(serverBytes));
 
     const primary = primaryArtifactUrl(candidate);
-    const primaryBytes = bytes(`primary:${candidate.loader.kind}:${candidate.loader.version}`);
+    let primaryBytes = bytes(`primary:${candidate.loader.kind}:${candidate.loader.version}`);
+    if (candidate.loader.kind === "neoforge") {
+      const dependencyBytes = bytes("reviewed-neoforge-dependency");
+      const dependencyUrl =
+        "https://maven.neoforged.net/releases/net/neoforged/example/1.0/example-1.0.jar";
+      const mappingsBytes = bytes("reviewed-server-mappings");
+      const mappingsSha1 = sha1(mappingsBytes);
+      const mappingsUrl =
+        `https://piston-data.mojang.com/v1/objects/${mappingsSha1}/server_mappings.txt`;
+      metadata.downloads.server_mappings = {
+        url: mappingsUrl,
+        sha1: mappingsSha1,
+        size: mappingsBytes.byteLength,
+      };
+      responses.set(mappingsUrl, response(mappingsBytes));
+      responses.set(dependencyUrl, response(dependencyBytes));
+      primaryBytes = zipOne("install_profile.json", bytes(JSON.stringify({
+        id: `neoforge-${candidate.loader.version}`,
+        json: "/install_profile.json",
+        minecraft: candidate.minecraftVersion,
+        data: {
+          MOJMAPS: {
+            server: `[net.minecraft:server:${candidate.minecraftVersion}-fixture:mappings@txt]`,
+          },
+        },
+        libraries: [{
+          name: "net.neoforged:example:1.0@jar",
+          downloads: {
+            artifact: {
+              url: dependencyUrl,
+              sha1: sha1(dependencyBytes),
+              size: dependencyBytes.byteLength,
+            },
+          },
+        }],
+      })));
+    }
+    const metadataBytes = bytes(JSON.stringify(metadata));
+    versions.push({ id: candidate.minecraftVersion, url: versionUrl, sha1: sha1(metadataBytes) });
+    responses.set(versionUrl, response(metadataBytes));
     responses.set(primary, response(primaryBytes));
     if (candidate.loader.kind === "fabric") {
       const url = `https://meta.fabricmc.net/v2/versions/loader/${candidate.minecraftVersion}/${candidate.loader.version}`;

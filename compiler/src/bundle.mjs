@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
+import { PRODUCTION_OUTPUT_LIMITS } from "./production-limits.mjs";
 
-export const MAX_BUNDLE_BYTES = 512 * 1024 * 1024;
+export const MAX_BUNDLE_BYTES = PRODUCTION_OUTPUT_LIMITS.maxBundleArchiveBytes;
 export const MAX_BUNDLE_ENTRIES = 4096;
+export const MAX_BUNDLE_LOGICAL_BYTES = PRODUCTION_OUTPUT_LIMITS.maxPackageInputBytes;
 const MAX_ENTRY_BYTES = 64 * 1024 * 1024;
-const MAX_LOGICAL_BYTES = 2 * 1024 * 1024 * 1024;
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const requiredResolvedFiles = new Set([
   "resolved/version.json",
@@ -213,7 +214,7 @@ function readZip(archive) {
     logicalBytes += size;
     if (
       end > archive.byteLength || (flags & 1) || (method !== 0 && method !== 8) ||
-      size > MAX_ENTRY_BYTES || logicalBytes > MAX_LOGICAL_BYTES ||
+      size > MAX_ENTRY_BYTES || logicalBytes > MAX_BUNDLE_LOGICAL_BYTES ||
       (size > 0 && (compressedSize === 0 || size / compressedSize > 100))
     ) {
       throw new CompilerFailure("invalid_bundle");

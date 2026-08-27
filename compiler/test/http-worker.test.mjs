@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import test from "node:test";
 import {
@@ -8,7 +8,12 @@ import {
   DeterministicFakeSandboxRunner,
   StrictArtifactDownloader,
 } from "../src/reviewed-builder.mjs";
-import { CompilerHttpWorker, createCompilerHttpServer } from "../src/http-worker.mjs";
+import {
+  CompilerHttpWorker,
+  createCompilerHttpServer,
+  parseUploadPreparation,
+  readBoundedCallbackBody,
+} from "../src/http-worker.mjs";
 import { HmacServiceIdentity, InMemoryReplayCache } from "../src/service-identity.mjs";
 
 const encoder = new TextEncoder();
@@ -17,6 +22,7 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
   const fixture = compilerFixture();
   const secret = "local-integration-test-secret-must-be-32-bytes";
   const callbackEvents = [];
+  const callbackPaths = [];
   const callbackVerifier = identity("callback", secret);
   const callbackServer = createServer(async (request, response) => {
     const body = await readBody(request);
@@ -28,6 +34,7 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
         body,
       });
       const event = JSON.parse(new TextDecoder().decode(body));
+      callbackPaths.push(request.url);
       if (event.status === "upload_prepared") {
         response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
           schemaVersion: 1,
@@ -63,9 +70,7 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
     ...reviewedDependencies(fixture, sandboxAdapter),
     requestAuthenticator: requestVerifier,
     callback: {
-      url: `http://127.0.0.1:${callbackAddress.port}/compiler-callback`,
-      uploadPreparationUrl:
-        `http://127.0.0.1:${callbackAddress.port}/compiler-upload-prepared`,
+      controlPlaneOrigin: `http://127.0.0.1:${callbackAddress.port}`,
       authenticator: callbackSigner,
     },
     fetchImpl: objectStore(fixture),
@@ -89,6 +94,10 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
   assert.equal(callbackEvents[0].status, "published");
   assert.equal(callbackEvents[0].compilerRequestId, fixture.job.compilerRequestId);
   assert.equal(callbackEvents[0].content.key, fixture.job.expectedContentKey);
+  assert.deepEqual(callbackPaths, [
+    `/v1/internal/shared-runtime-compiler/deployments/${fixture.job.deploymentId}/upload-prepared`,
+    `/v1/internal/shared-runtime-compiler/deployments/${fixture.job.deploymentId}/published`,
+  ]);
 
   const replay = await postSigned({
     url: `http://127.0.0.1:${address.port}/v1/compiler-jobs`,
@@ -98,6 +107,18 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
   });
   assert.equal(replay.status, 401);
   assert.deepEqual(await replay.json(), { code: "request_unauthorized" });
+  assert.equal(callbackEvents.length, 1);
+
+  const callbackInjection = structuredClone(envelope);
+  callbackInjection.job.callbackUrl = "https://attacker.example/callback";
+  const rejectedCallback = await postSigned({
+    url: `http://127.0.0.1:${address.port}/v1/compiler-jobs`,
+    signer: requestSigner,
+    envelope: callbackInjection,
+  });
+  assert.equal(rejectedCallback.status, 400);
+  assert.deepEqual(await rejectedCallback.json(), { code: "invalid_request" });
+  assert.equal(sandboxAdapter.calls.length, 1);
   assert.equal(callbackEvents.length, 1);
 
   const invalidGrants = structuredClone(envelope);
@@ -111,6 +132,8 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
   assert.deepEqual(await failed.json(), { status: "failed", code: "compiler_failed" });
   assert.equal(sandboxAdapter.calls.length, 1);
   assert.equal(callbackEvents.length, 2);
+  assert.equal(callbackPaths.at(-1),
+    `/v1/internal/shared-runtime-compiler/deployments/${fixture.job.deploymentId}/failed`);
   assert.deepEqual(callbackEvents[1], {
     schemaVersion: 1,
     status: "failed",
@@ -139,6 +162,69 @@ test("default HTTP composition remains fail closed while serving liveness", asyn
   assert.deepEqual(await job.json(), { code: "compiler_unavailable" });
 });
 
+test("chunked upload preparation is incrementally read below 4 MiB", async () => {
+  const job = {
+    compilerRequestId: "request-1",
+    deploymentId: "deployment-1",
+    manifestSha256: "a".repeat(64),
+    expectedContentKey: "shared-hosting/output.tar.zst",
+  };
+  const raw = encoder.encode(JSON.stringify({
+    schemaVersion: 1,
+    status: "upload_prepared",
+    compilerRequestId: job.compilerRequestId,
+    deploymentId: job.deploymentId,
+    manifestSha256: job.manifestSha256,
+    content: {
+      key: job.expectedContentKey,
+      sha256: "b".repeat(64),
+      compressedSize: 1,
+      logicalSize: 1,
+      paths: ["server.jar"],
+    },
+    descriptor: { schemaVersion: 1 },
+    reconciliation: {
+      key: job.expectedContentKey,
+      method: "GET",
+      url: "https://object.example/reconcile",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+    },
+  }));
+  let offset = 0;
+  const response = new Response(new ReadableStream({
+    pull(controller) {
+      if (offset === raw.byteLength) return controller.close();
+      const end = Math.min(offset + 7, raw.byteLength);
+      controller.enqueue(raw.subarray(offset, end));
+      offset = end;
+    },
+  }), { headers: { "content-type": "application/json" } });
+  assert.equal(response.headers.has("content-length"), false);
+  const parsed = await parseUploadPreparation(response, job);
+  assert.equal(parsed.status, "upload_prepared");
+  assert.equal(parsed.publication.content.key, job.expectedContentKey);
+});
+
+test("chunked upload preparation cancels immediately above 4 MiB", async () => {
+  const chunks = [new Uint8Array(4 * 1024 * 1024), Uint8Array.of(1)];
+  let index = 0;
+  let cancelled = false;
+  const response = new Response(new ReadableStream({
+    pull(controller) {
+      controller.enqueue(chunks[index]);
+      index += 1;
+    },
+    cancel() {
+      cancelled = true;
+    },
+  }));
+  assert.equal(response.headers.has("content-length"), false);
+  await assert.rejects(() => readBoundedCallbackBody(response),
+    /invalid_upload_preparation/);
+  assert.equal(cancelled, true);
+  assert.equal(index, 2);
+});
+
 test("HMAC identity binds the exact body and rejects expired timestamps", async () => {
   const secret = "local-integration-test-secret-must-be-32-bytes";
   const body = encoder.encode('{"job":"exact"}');
@@ -147,6 +233,7 @@ test("HMAC identity binds the exact body and rejects expired timestamps", async 
     secret,
     clock: () => 10_000,
   });
+
   const verifier = new HmacServiceIdentity({
     keyId: "control-plane",
     secret,
@@ -189,6 +276,42 @@ test("HMAC identity binds the exact body and rejects expired timestamps", async 
   }), /request_identity_rejected/);
 });
 
+test("HMAC identity interoperates with the API canonical format and rejects replay", async () => {
+  const keyId = "compiler-staging";
+  const secret = "api-shared-hmac-secret-at-least-32-bytes";
+  const timestamp = 50_000;
+  const nonce = "apiCanonicalNonce_123456789";
+  const method = "POST";
+  const target = "/v1/compiler-jobs";
+  const body = encoder.encode('{"schemaVersion":1,"requestId":"request_1"}');
+  const digest = createHash("sha256").update(body).digest("hex");
+  const canonical = `${method}\n${target}\n${timestamp}\n${nonce}\n${digest}`;
+  const signature = createHmac("sha256", secret).update(canonical).digest("base64url");
+  const headers = {
+    authorization: `HMAC ${keyId}:${signature}`,
+    "x-xmcl-timestamp": String(timestamp),
+    "x-xmcl-nonce": nonce,
+  };
+  const identity = new HmacServiceIdentity({
+    keyId,
+    secret,
+    nonceStore: new InMemoryReplayCache(),
+    clock: () => timestamp,
+  });
+  assert.equal(identity.replayProtected, false);
+  await identity.verifyIncoming({ method, target, headers, body });
+  await assert.rejects(
+    () => identity.verifyIncoming({ method, target, headers, body }),
+    /request_replayed/,
+  );
+  assert.throws(() => new HmacServiceIdentity({
+    keyId,
+    secret,
+    nonceStore: new InMemoryReplayCache(),
+    requireDurableReplay: true,
+  }), /invalid HMAC service identity configuration/);
+});
+
 test("in-memory HMAC replay state cannot compose a production-ready worker", () => {
   const fixture = compilerFixture();
   const secret = "local-integration-test-secret-must-be-32-bytes";
@@ -208,12 +331,32 @@ test("in-memory HMAC replay state cannot compose a production-ready worker", () 
     }),
     requestAuthenticator: localHmac,
     callback: {
-      url: "https://control-plane.example/compiler-callback",
-      uploadPreparationUrl: "https://control-plane.example/compiler-upload-prepared",
+      controlPlaneOrigin: "https://control-plane.example",
       authenticator: identity("callback", secret),
     },
   });
   assert.equal(worker.health().ready, false);
+});
+
+test("callback composition accepts only an exact control-plane origin", () => {
+  const fixture = compilerFixture();
+  const secret = "local-integration-test-secret-must-be-32-bytes";
+  for (const controlPlaneOrigin of [
+    "https://control-plane.example/arbitrary-path",
+    "https://control-plane.example/?callback=other",
+    "https://user@control-plane.example",
+  ]) {
+    const worker = new CompilerHttpWorker({
+      ...reviewedDependencies(fixture, new DeterministicFakeSandboxRunner()),
+      requestAuthenticator: identity("control-plane", secret),
+      callback: {
+        controlPlaneOrigin,
+        authenticator: identity("callback", secret),
+      },
+      allowInsecureForTests: true,
+    });
+    assert.equal(worker.health().ready, false);
+  }
 });
 
 test("a published callback with a lost response never emits a failed callback", async (t) => {
@@ -259,13 +402,11 @@ test("a published callback with a lost response never emits a failed callback", 
     ...reviewedDependencies(fixture, sandboxAdapter),
     requestAuthenticator: identity("control-plane", secret),
     callback: {
-      url: `http://127.0.0.1:${callbackAddress.port}/compiler-callback`,
-      uploadPreparationUrl:
-        `http://127.0.0.1:${callbackAddress.port}/compiler-upload-prepared`,
+      controlPlaneOrigin: `http://127.0.0.1:${callbackAddress.port}`,
       authenticator: identity("callback", secret),
       fetchImpl: async (url, options) => {
         const accepted = await fetch(url, options);
-        if (url.endsWith("/compiler-callback")) {
+        if (url.endsWith("/published")) {
           throw new Error("simulated response loss after callback acceptance");
         }
         return accepted;

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "callback": {
+    "controlPlaneOrigin": "https://api-staging.xmcl.app",
+    "timeoutMs": 10000
+  },
+  "identity": {
+    "keyId": "compiler-staging",
+    "secretPath": "/run/credentials/xmcl-compiler.service/service-hmac-secret",
+    "maxAgeMs": 60000,
+    "maxReplayEntries": 1000000
+  },
+  "sandbox": {
+    "timeoutMs": 300000,
+    "addressSpaceBytes": 3221225472,
+    "fileSizeBytes": 268435456,
+    "processLimit": 256,
+    "cpuSeconds": 240
+  },
+  "artifactDownloadTimeoutMs": 30000,
+  "maxConcurrentJobs": 1
+}

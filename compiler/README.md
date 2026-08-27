@@ -14,8 +14,10 @@ client instance, not a local dedicated-server export. It carries selected
 instance artifacts and their hashes plus loader/version metadata; a reviewed
 builder must assemble the dedicated-server runtime independently.
 
-`FailClosedRuntimeBuilder` remains the default. A deployment can explicitly
-compose `ReviewedRuntimeBuilder` (or `createReviewedCompilerWorker`) only with:
+The standalone worker server now composes `ReviewedRuntimeBuilder` from fixed
+production paths. Library callers still remain fail closed unless they
+explicitly compose `ReviewedRuntimeBuilder` (or `createReviewedCompilerWorker`)
+with:
 
 - a versioned `ReviewedToolchainCatalog` bound to the exact raw runtime-catalog
   SHA, exact loader coordinate, approved HTTPS host, artifact URL, size, and
@@ -40,9 +42,10 @@ PUT, the worker rechecks every packaged output path, mode, size, SHA-256,
 runtime descriptor, and generated launcher.
 
 `DeterministicFakeArtifactDownloader`, `DeterministicFakeJreRegistry`, and
-`DeterministicFakeSandboxRunner` are test doubles only. No production sandbox,
-JRE root, reviewed catalog, or artifact mirror is bundled here; missing or
-invalid injected dependencies return `compiler_unavailable`.
+`DeterministicFakeSandboxRunner` are test doubles only. The deployable server
+never imports them. It uses `StrictArtifactDownloader`,
+`VerifiedReadOnlyJreRegistry`, and `BubblewrapSandboxAdapter`; missing or
+invalid production dependencies leave `/readyz` unavailable.
 
 Local-world migration is a separate `.xmcl-world-seed` path. `WorldSeedWorker`
 accepts exactly one control-plane-issued GET grant bound to an account, service,
@@ -54,26 +57,78 @@ or completed runtime worlds.
 
 ## Deployment prerequisites
 
-- Run the image as the non-root user already declared in the Dockerfile with a
-  read-only root filesystem, an ephemeral writable workspace, no Docker socket,
-  no host mounts, and PID/CPU/memory limits.
-- Use mTLS or an equivalent workload identity for the four internal control
-  plane callbacks: grant retrieval, durable upload preparation, immutable
-  publish, and durable failure
-  reporting. Do not inject browser, node, billing, or object-store master
-  credentials.
-- Permit HTTPS egress only to reviewed artifact origins while a future reviewed
-  builder acquires exact catalog artifacts; disable egress before server-loader
-  assembly.
+- Run the supported host systemd unit as UID/GID 10001 with its read-only
+  application/config/JRE paths, ephemeral workspace, persistent replay path,
+  empty capability sets, and PID/CPU/memory limits.
+- Use the control-plane-compatible HMAC service identity for queue submissions
+  and the three callbacks: durable upload preparation, immutable publish, and
+  durable failure reporting. The initial closed envelope already carries both
+  exact object grants; the compiler does not call a grants route. Do not inject
+  browser, node, billing, or object-store master credentials.
+- Permit worker HTTPS egress only to the callback/object grants and reviewed
+  artifact origins. Bubblewrap unshares the network namespace before any
+  installer code executes.
 - The API owns durable deployment state. Retries use the same deployment ID,
   manifest SHA, exact input key, and immutable `If-None-Match: *` output grant.
-- Install real reviewed Forge/Fabric/NeoForge/Quilt artifacts, approved mirror
-  allowlists, matching verified JRE roots, and a sandbox adapter that enforces
-  the requested attestations before composing the reviewed builder. Until then,
-  retain the default fail-closed worker.
+- Materialize the exact Java 21 root listed in `jre-registry.example.json`.
+  Production composition restricts its catalog view to NeoForge, so Forge,
+  Fabric, and Quilt reject as `unsupported_compatibility` before any artifact
+  download. Their unused Java 8/16/17/25 roots are neither accepted nor
+  required.
 
 Run `npm test` and `npm run check` locally. This package intentionally does not
-claim live loader compilation until those external reviewed adapters exist.
+claim live loader compilation from the fake-runner unit test. Before deploying
+a catalog/JRE pair, run the opt-in Linux integration test against the exact
+materialized JRE on a read-only mount:
+
+```text
+XMCL_RUN_NEOFORGE_INTEGRATION=1 \
+XMCL_REVIEWED_JAVA_21_ROOT=/opt/xmcl/jres/java-runtime-delta-21 \
+XMCL_INTEGRATION_WORKSPACE_ROOT=/var/lib/xmcl-compiler/integration \
+npm run test:integration:neoforge
+```
+
+The test verifies the complete materialized JRE through
+`VerifiedReadOnlyJreRegistry`, downloads all 83 reviewed NeoForge 1.21.1
+artifacts through `StrictArtifactDownloader`, executes the rewritten installer
+offline through the real `prlimit`/Bubblewrap adapter, checks every catalog
+library and generated `unix_args.txt`, and starts the resulting server through
+its bounded `--help` path in a second network-disabled Bubblewrap sandbox. It
+fails unless the JRE source is an actual read-only mount. Optional
+`XMCL_BWRAP_PATH` and `XMCL_PRLIMIT_PATH` values must be absolute paths.
+
+### Reproducible reviewed Java 21 root
+
+Do not install Java with apt and do not create the resolution manifest by hand.
+From a checkout containing the pinned runtime and toolchain locks, run:
+
+```text
+cd compiler
+node scripts/materialize_verified_jre.mjs \
+  --runtime-catalog-lock ../runtime-image/runtime-catalog.lock.json \
+  --toolchain-catalog-lock ./toolchain-catalog.lock.json \
+  --jre-id java-runtime-delta-21 \
+  --output-root /srv/xmcl-compiler/jres/java-runtime-delta-21
+```
+
+The materializer fails if the destination already exists. It first verifies
+the raw runtime lock SHA-256 equals the reviewed toolchain
+`runtimeCatalogRevision`, selects only the exact NeoForge Java component/major,
+and verifies the canonical resolution digest equals:
+
+```text
+2b3bf58669d502aae932fc492019c1d33bc3439dce1d7951110802d55a8b427d
+```
+
+It permits only digest-addressed `piston-data.mojang.com` object URLs, rejects
+redirects and encoded responses, verifies exact Content-Length, byte count,
+and SHA-1 for every file, constrains links to the root, writes deterministic
+modes, and atomically renames a sibling partial directory only after success.
+It then writes the exact canonical resolution as
+`.xmcl-runtime-resolution.json` and verifies its digest again. A verified run
+of the current locks materializes 136 files totaling 108,928,861 bytes. The
+production registry independently repeats the manifest digest and complete
+filesystem verification at startup.
 
 ## Reviewed toolchain catalog
 
@@ -115,7 +170,8 @@ or publish an image, upload content, or provision infrastructure.
 
 The HTTP response acknowledges only after the worker has attempted the
 immutable upload and the authenticated callback. Before the PUT, the worker
-posts its reviewed content digest and descriptor to `uploadPreparationUrl`.
+posts its reviewed content digest and descriptor to the code-owned
+`upload-prepared` deployment route.
 The control plane durably binds that exact payload and returns a single-key GET
 reconciliation grant. A 200 response with
 `{"status":"failed"}` means the control-plane failure callback was attempted;
@@ -163,7 +219,8 @@ identical. The envelope lifetime is at most five minutes. Before any download
 or sandbox call, the worker reuses `validateCompilerJob` and `verifyGrantSet`
 to bind account, service, deployment, manifest SHA, input archive key, output
 key, GET/PUT methods, HTTPS grant URLs, unexpired grant timestamps, no input
-headers, and exactly `If-None-Match: *` on the output grant. It then reuses the
+headers, and exactly `If-None-Match: *` on the output grant, optionally with
+Azure's exact `x-ms-blob-type: BlockBlob`. It then reuses the
 bundle and reviewed-toolchain validation described above. Neither the envelope
 nor its grants can select callbacks, commands, Java paths, JVM arguments,
 Docker options, or sandbox settings.
@@ -175,13 +232,22 @@ preparation begins. Published-callback delivery is instead reported as
 `published_callback_uncertain`; upload uncertainty is reported as
 `upload_reconciliation_uncertain` so it can be reconciled safely.
 
-Completion and failure go only to the callback URL configured when the worker
-is composed. Upload preparation uses a separately configured immutable
-`uploadPreparationUrl`; it is HTTPS in production, cannot contain credentials
-or a fragment, does not follow redirects, and is never read from a job. A
-completion includes the validated content and runtime descriptor; a failure
-includes only the fixed failure code. Callback receivers must authenticate and
-deduplicate the same `compilerRequestId`.
+Composition accepts only an exact HTTPS control-plane origin with no path,
+query, credentials, or fragment. For the already validated `deploymentId`,
+compiler-owned code derives exactly these paths:
+
+```text
+/v1/internal/shared-runtime-compiler/deployments/{deploymentId}/upload-prepared
+/v1/internal/shared-runtime-compiler/deployments/{deploymentId}/published
+/v1/internal/shared-runtime-compiler/deployments/{deploymentId}/failed
+```
+
+The HMAC signature covers the exact derived path and body. Upload preparation,
+publication, and failure cannot share or substitute routes. Neither callback
+URLs nor templates are accepted from a job or its grants. A completion includes
+the validated content and runtime descriptor; a failure includes only the
+fixed failure code. Callback receivers must authenticate and deduplicate the
+same `compilerRequestId`.
 
 ## Service identity and replay protection
 
@@ -193,8 +259,8 @@ signOutgoing({ method, target, body })
 ```
 
 Adapters must provide signed service identity plus timestamp and nonce replay
-checks. `HmacServiceIdentity` is supplied for a private HMAC key of at least
-32 bytes for local/integration testing only. It signs:
+checks. Production composition uses `HmacServiceIdentity` with the API's
+matching key ID and an exact shared secret of at least 32 bytes. It signs:
 
 ```text
 METHOD \n PATH_AND_QUERY \n UNIX_MILLISECONDS \n NONCE \n SHA256(BODY)
@@ -203,11 +269,14 @@ METHOD \n PATH_AND_QUERY \n UNIX_MILLISECONDS \n NONCE \n SHA256(BODY)
 in `Authorization: HMAC <key-id>:<base64url-signature>`, with
 `X-Xmcl-Timestamp` and `X-Xmcl-Nonce`. It accepts timestamps within 60 seconds
 and rejects reused nonces. Its in-memory nonce cache is **local test/single
-process only**, cannot be marked durable, and `HmacServiceIdentity` is always
-ineligible for production worker composition. A production HMAC deployment must
-implement a distinct `ServiceIdentity` adapter backed by an atomic shared
-replay store (for example, control-plane/Redis conditional insert); each
-callback receiver must enforce the same policy.
+process only** and cannot be marked durable. Production uses
+`FilesystemReplayStore`, whose atomic create and fsync operations require a
+persistent volume shared by every compiler replica. `HmacServiceIdentity`
+becomes production-eligible only with a replay store explicitly marked durable.
+Production composition also sets `requireDurableReplay: true`, so construction
+fails rather than silently producing an unready identity if that guarantee is
+absent. In-memory HMAC identities always expose `replayProtected: false`.
+Each callback receiver must enforce the matching HMAC and replay policy.
 
 JWT and mTLS deployments use the same adapter boundary. A JWT adapter must bind
 method, target, body digest, issuance time, expiry, and unique token ID. An
@@ -227,7 +296,7 @@ injects all of the following:
    no-secrets/no-Docker, bounded-resource, approved-artifact-only capabilities;
 4. `StrictArtifactDownloader` (or the explicitly test-only fake path);
 5. replay-protected inbound and callback service-identity adapters; and
-6. an immutable configured callback URL and authenticated callback transport.
+6. one exact HTTPS control-plane origin and authenticated callback transport.
 
 The adapter receives only the compiler-owned assembly plan, exact reviewed
 artifact bytes, and exact JRE root token. It has one narrow
@@ -235,37 +304,143 @@ artifact bytes, and exact JRE root token. It has one narrow
 bundle file, select a JVM, invoke Docker, or load an adapter module from an
 environment variable. Never make a job field into adapter configuration.
 
-No approved production sandbox, read-only JRE roots, or installer execution
-adapter is included in this repository. The included container consequently
-starts liveness only and returns 503 from `/readyz` and job delivery until a
-trusted deployment image composes the reviewed adapters in code. This is
-intentional: Forge, Fabric, NeoForge, and Quilt installers are **not claimed
-production-ready** here.
+The production adapter runs the exact reviewed NeoForge installer, Mojang
+server, Mojang mappings, installer libraries, and runtime libraries with
+`--offline`. The catalog includes every one of these inputs by URL, size, and
+SHA-256. The adapter deterministically removes only the installer's
+`DOWNLOAD_MOJMAPS` processor after staging the exact catalog-pinned mappings;
+this prevents the processor's hard-coded network request. Bubblewrap then
+executes the derived installer in a new user/PID/network/IPC/UTS/cgroup
+namespace with an empty base root. `prlimit` enforces address-space, file-size,
+process, and CPU ceilings, and a wall-clock timeout is enforced by the parent.
 
-## Container, environment, and image publication
+Production output is intentionally smaller than the sandbox filesystem ceiling.
+The installer may return at most 320 MiB, one file may be at most 256 MiB, and
+the final installer-plus-modpack input may be at most 384 MiB. Input bundles
+are capped at 400 MiB compressed and 384 MiB logical. Tar construction is
+capped at 400 MiB and the raw-Zstandard archive at 401 MiB before allocation.
+These limits leave room in the 3200-MiB service cgroup for the live file map,
+tar/archive verification buffers, downloaded artifacts, Node, and native
+overhead. Packaging reuses verified artifact, sandbox, and bundle byte arrays;
+archive verification uses views rather than cloning every file.
 
-The image runs `src/worker-server.mjs` as UID/GID `10001`, exposes port 8080,
-and has a liveness health check against `/healthz`.
+## Runtime packaging
 
-| Environment variable | Default | Allowed values | Meaning |
-| --- | --- | --- | --- |
-| `HOST` | `0.0.0.0` | `0.0.0.0`, `127.0.0.1`, `::` | HTTP bind address |
-| `PORT` | `8080` | `1`–`65535` | HTTP bind port |
-| `NODE_ENV` | `production` | platform value | Node runtime mode; it does not enable compilation |
+The Dockerfile is a fail-closed, experimental packaging artifact, not the
+supported staging deployment. Default Docker seccomp/AppArmor blocks the
+mandatory Bubblewrap namespace probe. No Docker invocation is documented or
+supported until narrow reviewed Docker seccomp and AppArmor profiles exist.
+Never bypass readiness with privileged mode, `SYS_ADMIN`, a Docker socket, or
+an unconfined profile.
 
 There are deliberately no environment variables for catalog URLs, installer
 commands, Java paths, Docker options, sandbox commands, callback URLs, or
-identity secrets. A trusted deployment integration supplies reviewed objects
-and secret-backed identity adapters without making them user-controlled.
+identity secrets. Production composition reads these fixed paths only:
 
-Run the container with a read-only root filesystem, no host mounts or Docker
-socket, no added capabilities, an ephemeral writable workspace owned by the
-non-root UID if the reviewed sandbox needs one, and CPU/memory/PID/network
-limits. A default image being live is not evidence that it is ready to compile.
+- `/opt/xmcl-compiler/app/toolchain-catalog.lock.json`;
+- `/etc/xmcl-compiler/worker.json` (schema shown by `worker.example.json`);
+- `/etc/xmcl-compiler/jre-registry.json` (schema and exact current digests shown
+  by `jre-registry.example.json`);
+- read-only JRE bind mounts below `/opt/xmcl/jres`;
+- one systemd credential at
+  `/run/credentials/xmcl-compiler.service/service-hmac-secret`;
+- an ephemeral writable directory at `/run/xmcl-compiler/workspaces`; and
+- an atomic shared persistent replay volume at
+  `/var/lib/xmcl-compiler/replay`.
+
+The Java 21 JRE root must be on a read-only mount and must contain
+`.xmcl-runtime-resolution.json`, copied from the matching `resolutions` entry
+of the exact runtime catalog. Startup hashes that canonical resolution against
+the catalog JRE digest, then verifies every declared file, size, SHA-1,
+executable bit, directory, and symlink without permitting a link to escape the
+root. `/readyz` becomes 200 only after those checks, the replay store, key
+permissions, and an actual Bubblewrap namespace probe succeed.
+
+### Ubuntu 24.04 staging deployment contract
+
+The exact supported staging composition is the host systemd service in
+`deploy/xmcl-compiler.service`, not Docker. It runs directly on Ubuntu 24.04 as
+the dedicated numeric UID/GID 10001, listening only on host loopback. Install
+reviewed/pinned Node 22 at `/usr/bin/node` plus Ubuntu's `bubblewrap`,
+`util-linux`, and `ca-certificates` packages. The distro Bubblewrap AppArmor
+policy and `kernel.unprivileged_userns_clone=1` must permit an unprivileged
+user/network/PID/mount namespace; do not disable AppArmor globally.
+
+The 2-vCPU/4-GiB shape supports one concurrent compiler job.
+Use the limits in `worker.example.json`: a 3-GiB installer address-space
+limit, fixed 128-MiB/1-GiB Java heap, 512-MiB metaspace, 256 processes,
+256-MiB compressed-class space, 128-MiB code cache, 256-MiB direct-memory
+ceiling, 512-KiB thread stacks, two visible JVM processors, 240 CPU-seconds,
+300-second wall timeout, and 256-MiB per-file limit. The unit enforces two CPUs,
+3200 MiB memory, no swap, and 512 tasks. Do not increase `maxConcurrentJobs`.
+
+Only these environment variables are read:
+
+```text
+NODE_ENV=production
+HOST=127.0.0.1
+PORT=8080
+```
+
+Prepare these exact host paths:
+
+| Path | Access/ownership |
+| --- | --- |
+| `/opt/xmcl-compiler/app` | root-owned, immutable application tree |
+| `/etc/xmcl-compiler/worker.json` | root-owned mode 0444 |
+| `/etc/xmcl-compiler/jre-registry.json` | root-owned mode 0444 |
+| `/etc/xmcl-compiler/service-hmac-secret` | root-owned mode 0400; exact API-matching bytes, at least 32 bytes |
+| `/opt/xmcl/jres` | exact JRE roots on a read-only `nosuid,nodev` mount |
+| `/run/xmcl-compiler/workspaces` | systemd-created ephemeral mode 0700, UID/GID 10001 |
+| `/var/lib/xmcl-compiler/replay` | systemd-created persistent mode 0700, UID/GID 10001 |
+
+Install the unit at `/etc/systemd/system/xmcl-compiler.service`, run
+`systemd-analyze verify` on it, then `systemctl daemon-reload` and
+`systemctl enable --now xmcl-compiler`. `LoadCredential` exposes the secret
+only inside the service credential directory. `ProtectSystem=strict`, empty
+capability sets, private devices/tmp, read-only code/config/JRE paths, and
+explicit writable workspace/replay paths keep the host composition
+fail-closed. The unit deliberately does not apply a broad syscall filter:
+Bubblewrap requires namespace-local mount syscalls, while its own
+`--unshare-all` disables installer networking. `/readyz` must return 200 before
+nginx receives traffic.
+
+Restrict inbound host traffic to SSH, TCP 80, and TCP 443. Restrict compiler
+egress to the exact HTTPS callback/object-grant destinations and the artifact
+hosts in `toolchain-catalog.lock.json`. Installer assembly itself has no
+network namespace.
+
+nginx should terminate TLS and be the only public compiler listener:
+
+```nginx
+server {
+    listen 80;
+    server_name 130.94.89.36.sslip.io;
+
+    location / {
+        return 404;
+    }
+
+    location = /v1/compiler-jobs {
+        client_max_body_size 256k;
+        proxy_http_version 1.1;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 10m;
+        proxy_send_timeout 30s;
+        proxy_pass http://127.0.0.1:8080;
+    }
+}
+```
+
+Obtain and renew the certificate with certbot's nginx integration for
+`130.94.89.36.sslip.io`, then retain the same exact-location proxy in the
+generated TLS server. Do not proxy `/healthz` or `/readyz` publicly. Deployment
+must gate traffic on a local `GET http://127.0.0.1:8080/readyz` returning 200,
+not merely the liveness health check.
 
 `.github/workflows/publish-compiler-image.yml` at the repository root validates
-tests and publishes only a unique
+tests and publishes the experimental image only as a unique
 `sha-<full-git-sha>` GHCR tag, and attaches BuildKit provenance and SBOM
-attestations. Tags are convenience references; deploy the resulting immutable
-`ghcr.io/voxelum/xmcl-shared-node-compiler@sha256:...` digest after
-verifying the provenance and SBOM. The workflow never publishes `latest`.
+attestations. The workflow never publishes `latest`. Do not deploy that image
+for staging until reviewed seccomp/AppArmor profiles make its real Bubblewrap
+probe pass; image publication does not supersede the host-systemd contract.

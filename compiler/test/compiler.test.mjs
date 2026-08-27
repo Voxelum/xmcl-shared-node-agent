@@ -118,6 +118,7 @@ function fixture({ includeEula = false } = {}) {
     accountId: job.accountId,
     serviceId: job.serviceId,
     deploymentId: job.deploymentId,
+    compilerRequestId: job.compilerRequestId,
     manifestSha256: job.manifestSha256,
     grants: [
       {
@@ -141,6 +142,28 @@ function fixture({ includeEula = false } = {}) {
 test("grant verification rejects substituted node or output grants", () => {
   const { job, grants } = fixture();
   assert.equal(verifyGrantSet(grants, job).output.key, job.expectedContentKey);
+  const azure = structuredClone(grants);
+  azure.grants[1].headers["x-ms-blob-type"] = "BlockBlob";
+  assert.deepEqual(verifyGrantSet(azure, job).output.headers, {
+    "if-none-match": "*",
+    "x-ms-blob-type": "BlockBlob",
+  });
+  for (const headers of [
+    { "if-none-match": "*", "x-ms-blob-type": "AppendBlob" },
+    { "if-none-match": "*", "x-ms-blob-type": "blockblob" },
+    { "if-none-match": "*", "x-ms-version": "2025-01-05" },
+  ]) {
+    const invalid = structuredClone(grants);
+    invalid.grants[1].headers = headers;
+    assert.throws(() => verifyGrantSet(invalid, job), /invalid_grants/);
+  }
+  assert.throws(
+    () => verifyGrantSet({ ...grants, callbackUrl: "https://attacker.example" }, job),
+    /invalid_grants/,
+  );
+  const grantInjection = structuredClone(grants);
+  grantInjection.grants[1].callbackUrl = "https://attacker.example";
+  assert.throws(() => verifyGrantSet(grantInjection, job), /invalid_grants/);
   assert.throws(
     () => verifyGrantSet({ ...grants, grants: [{ ...grants.grants[0], key: "world/revision" }, grants.grants[1]] }, job),
     /invalid_grants/,
@@ -208,6 +231,7 @@ test("the unavailable builder reports a durable failure and never executes the b
 
 test("reviewed builder uploads only the immutable output grant and publishes validated content", async () => {
   const { archive, job, grants } = fixture();
+  grants.grants[1].headers["x-ms-blob-type"] = "BlockBlob";
   const artifact = Uint8Array.from([4, 5, 6]);
   const coordinate = "net.fabricmc:fabric-loader:0.16.10";
   const builder = reviewedBuilder({
@@ -239,7 +263,10 @@ test("reviewed builder uploads only the immutable output grant and publishes val
   const result = await worker.run(job);
   assert.deepEqual(result, { status: "published", deploymentId: job.deploymentId });
   assert.deepEqual(requests.map((request) => request.options.method), ["GET", "PUT"]);
-  assert.deepEqual(requests[1].options.headers, { "if-none-match": "*" });
+  assert.deepEqual(requests[1].options.headers, {
+    "if-none-match": "*",
+    "x-ms-blob-type": "BlockBlob",
+  });
   assert.equal(publications.length, 1);
   assert.equal(publications[0].content.key, job.expectedContentKey);
   assert.ok(publications[0].content.paths.includes(".xmcl/runtime.json"));

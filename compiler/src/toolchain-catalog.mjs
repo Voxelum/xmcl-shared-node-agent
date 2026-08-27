@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { inflateRawSync } from "node:zlib";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -19,6 +20,7 @@ export const APPROVED_ARTIFACT_HOSTS = Object.freeze([
   "maven.minecraftforge.net",
   "maven.neoforged.net",
   "maven.quiltmc.org",
+  "libraries.minecraft.net",
   "piston-data.mojang.com",
 ]);
 
@@ -102,6 +104,7 @@ export class StrictCatalogFetcher {
       } catch (error) {
         if (!(error instanceof ToolchainCatalogFailure) ||
           !["upstream_fetch_failed", "upstream_fetch_timeout"].includes(error.code) || attempt === 2) {
+          if (error instanceof ToolchainCatalogFailure) error.url ??= url;
           throw error;
         }
         await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
@@ -179,12 +182,16 @@ export async function generateToolchainCatalog({
     const jre = jreFor(runtime, candidate.java);
     const primary = await resolvePrimaryArtifact(fetcher, candidate);
     const server = await resolveMinecraftServer(fetcher, minecraft.get(candidate.minecraftVersion), candidate);
+    const dependencies = candidate.loader.kind === "neoforge"
+      ? await resolveNeoForgeDependencies(fetcher, primary.artifactBytes,
+        minecraft.get(candidate.minecraftVersion), candidate)
+      : [];
     toolchains.push({
       minecraftVersion: candidate.minecraftVersion,
       loader: { ...candidate.loader },
       java: { ...candidate.java },
       jre,
-      artifacts: sortArtifacts([primary, server]),
+      artifacts: sortArtifacts([primary, server, ...dependencies]),
       launchTemplate: loaderTemplates[candidate.loader.kind],
     });
   }
@@ -515,6 +522,54 @@ async function resolveMinecraftServer(fetcher, metadata, candidate) {
   });
 }
 
+async function resolveNeoForgeDependencies(fetcher, installerBytes, metadata, candidate) {
+    const profile = parseJson(readZipEntry(installerBytes, "install_profile.json"),
+      "loader_metadata_malformed");
+    const versionPath = typeof profile.json === "string" ? profile.json.replace(/^\//, "") : "";
+    const version = parseJson(readZipEntry(installerBytes, versionPath),
+      "loader_metadata_malformed");
+    if (profile.minecraft !== candidate.minecraftVersion || !Array.isArray(profile.libraries) ||
+      version.id !== `neoforge-${candidate.loader.version}` || !Array.isArray(version.libraries)) {
+      throw new ToolchainCatalogFailure("loader_metadata_malformed");
+    }
+    const artifacts = [];
+    const keys = new Set();
+    for (const library of [...profile.libraries, ...version.libraries]) {
+      const download = library?.downloads?.artifact;
+      const coordinate = normalizeMavenCoordinate(library?.name);
+      if (!coordinate || !plainObject(download) || typeof download.url !== "string" ||
+        !validSha1(download.sha1) || !validPositiveInteger(download.size, MAX_ARTIFACT_BYTES)) {
+        throw new ToolchainCatalogFailure("loader_metadata_malformed");
+      }
+      const key = `${coordinate}\0${download.url}`;
+      if (keys.has(key)) continue;
+      keys.add(key);
+      artifacts.push(await downloadArtifact(fetcher, {
+        role: "dependency",
+        coordinate,
+        url: download.url,
+        expectedSha1: download.sha1,
+        expectedSize: download.size,
+      }));
+    }
+    const mappings = metadata.downloads?.server_mappings;
+    const mappingsCoordinate = normalizeMavenCoordinate(
+      profile.data?.MOJMAPS?.server?.slice(1, -1),
+    );
+    if (!mappingsCoordinate || !plainObject(mappings) || typeof mappings.url !== "string" ||
+      !validSha1(mappings.sha1) || !validPositiveInteger(mappings.size, MAX_ARTIFACT_BYTES)) {
+      throw new ToolchainCatalogFailure("minecraft_metadata_malformed");
+    }
+    artifacts.push(await downloadArtifact(fetcher, {
+      role: "dependency",
+      coordinate: mappingsCoordinate,
+      url: mappings.url,
+      expectedSha1: mappings.sha1,
+      expectedSize: mappings.size,
+    }));
+    return artifacts;
+}
+
 async function downloadArtifact(fetcher, {
   role,
   coordinate,
@@ -528,13 +583,15 @@ async function downloadArtifact(fetcher, {
     throw new ToolchainCatalogFailure("upstream_size_mismatch");
   }
   verifySha1(bytes, expectedSha1, "upstream_checksum_mismatch");
-  return {
+  const artifact = {
     role,
     coordinate,
     url,
     sizeBytes: bytes.byteLength,
     sha256: sha256(bytes),
   };
+  Object.defineProperty(artifact, "artifactBytes", { value: bytes });
+  return artifact;
 }
 
 function validateToolchain(toolchain, catalog, runtime, tupleKeys) {
@@ -543,7 +600,8 @@ function validateToolchain(toolchain, catalog, runtime, tupleKeys) {
     !validMinecraftVersion(toolchain.minecraftVersion) || !validLoader(toolchain.loader) ||
     !validJava(toolchain.java) || !validJre(toolchain.jre) ||
     toolchain.launchTemplate !== loaderTemplates[toolchain.loader.kind] ||
-    !Array.isArray(toolchain.artifacts) || toolchain.artifacts.length !== 2) {
+    !Array.isArray(toolchain.artifacts) || toolchain.artifacts.length < 2 ||
+    toolchain.artifacts.length > 256) {
     throw new ToolchainCatalogFailure("toolchain_malformed");
   }
   const tuple = candidateKey(toolchain);
@@ -560,7 +618,8 @@ function validateToolchain(toolchain, catalog, runtime, tupleKeys) {
     java: toolchain.java,
   };
   const primary = toolchain.artifacts.filter((artifact) => artifact?.role === "primary");
-  const server = toolchain.artifacts.filter((artifact) => artifact?.role === "dependency");
+  const server = toolchain.artifacts.filter((artifact) =>
+    artifact?.coordinate === `com.mojang:minecraft-server:${toolchain.minecraftVersion}:server`);
   if (primary.length !== 1 || server.length !== 1 ||
     primary[0].coordinate !== primaryCoordinate(expectedPrimary) ||
     primary[0].url !== primaryArtifactUrl(expectedPrimary) ||
@@ -573,6 +632,9 @@ function validateToolchain(toolchain, catalog, runtime, tupleKeys) {
   }
   for (const artifact of toolchain.artifacts) validateArtifact(artifact, catalog.approvedArtifactHosts);
   validateMinecraftServerUrl(server[0].url);
+  if (toolchain.loader.kind === "neoforge" && toolchain.artifacts.length < 3) {
+    throw new ToolchainCatalogFailure("required_artifact_missing");
+  }
 }
 
 function validateArtifact(artifact, hosts) {
@@ -661,7 +723,56 @@ function validVersion(value) {
 
 function validCoordinate(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 256 &&
-    /^[a-z0-9_.-]+:[a-z0-9_.-]+:[0-9A-Za-z._+-]+(?::[a-z0-9_.-]+)?$/.test(value);
+    /^[0-9A-Za-z_.-]+:[0-9A-Za-z_.-]+:[0-9A-Za-z._+-]+(?::[0-9A-Za-z_.-]+)?$/.test(value);
+}
+
+function normalizeMavenCoordinate(value) {
+  if (typeof value !== "string") return undefined;
+  const coordinate = value.replace(/@(jar|zip|txt)$/, "");
+  return validCoordinate(coordinate) ? coordinate : undefined;
+}
+
+function readZipEntry(bytes, expectedPath) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 22) {
+    throw new ToolchainCatalogFailure("loader_metadata_malformed");
+  }
+  for (let offset = bytes.byteLength - 22; offset >= Math.max(0, bytes.byteLength - 65_557);
+    offset -= 1) {
+    if (u32(bytes, offset) !== 0x06054b50) continue;
+    const entries = u16(bytes, offset + 10);
+    let central = u32(bytes, offset + 16);
+    for (let index = 0; index < entries; index += 1) {
+      if (u32(bytes, central) !== 0x02014b50) break;
+      const method = u16(bytes, central + 10);
+      const compressedSize = u32(bytes, central + 20);
+      const size = u32(bytes, central + 24);
+      const nameLength = u16(bytes, central + 28);
+      const extraLength = u16(bytes, central + 30);
+      const commentLength = u16(bytes, central + 32);
+      const local = u32(bytes, central + 42);
+      const name = decoder.decode(bytes.subarray(central + 46, central + 46 + nameLength));
+      if (name === expectedPath) {
+        if (u32(bytes, local) !== 0x04034b50) break;
+        const localName = u16(bytes, local + 26);
+        const localExtra = u16(bytes, local + 28);
+        const start = local + 30 + localName + localExtra;
+        const compressed = bytes.subarray(start, start + compressedSize);
+        const result = method === 0 ? compressed : method === 8 ? inflateRawSync(compressed) : undefined;
+        if (!result || result.byteLength !== size) break;
+        return new Uint8Array(result);
+      }
+      central += 46 + nameLength + extraLength + commentLength;
+    }
+  }
+  throw new ToolchainCatalogFailure("loader_metadata_malformed");
+}
+
+function u16(bytes, offset) {
+  return bytes[offset] | (bytes[offset + 1] << 8);
+}
+
+function u32(bytes, offset) {
+  return (u16(bytes, offset) | (u16(bytes, offset + 2) << 16)) >>> 0;
 }
 
 function validIdentifier(value) {
