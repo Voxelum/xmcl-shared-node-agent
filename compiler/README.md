@@ -397,7 +397,9 @@ Prepare these exact host paths:
 Install the unit at `/etc/systemd/system/xmcl-compiler.service`, run
 `systemd-analyze verify` on it, then `systemctl daemon-reload` and
 `systemctl enable --now xmcl-compiler`. `LoadCredential` exposes the secret
-only inside the service credential directory. `ProtectSystem=strict`, empty
+only inside the service credential directory. The source remains mode 0400;
+systemd may materialize the root-owned credential as mode 0440, which is the
+only group-readable secret mode the worker accepts. `ProtectSystem=strict`, empty
 capability sets, private devices/tmp, read-only code/config/JRE paths, and
 explicit writable workspace/replay paths keep the host composition
 fail-closed. The unit deliberately does not apply a broad syscall filter:

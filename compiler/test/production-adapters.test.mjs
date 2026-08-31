@@ -10,12 +10,28 @@ import {
 import { VerifiedReadOnlyJreRegistry } from "../src/verified-jre-registry.mjs";
 import { BubblewrapSandboxAdapter } from "../src/bubblewrap-sandbox.mjs";
 import { canonicalJsonBytes } from "../src/toolchain-catalog.mjs";
+import { safeSecretMetadata } from "../src/production-composition.mjs";
 
 const encoder = new TextEncoder();
 const testRoot = resolve(".test-production-adapters");
 
 test.after(async () => {
   await rm(testRoot, { recursive: true, force: true });
+});
+
+test("production identity accepts only private source or systemd credential modes", () => {
+  const metadata = (mode, uid = 0, gid = 0) => ({
+    mode,
+    uid,
+    gid,
+    size: 64,
+    isFile: () => true,
+  });
+  assert.equal(safeSecretMetadata(metadata(0o100400)), true);
+  assert.equal(safeSecretMetadata(metadata(0o100440)), true);
+  assert.equal(safeSecretMetadata(metadata(0o100440, 10001, 10001)), false);
+  assert.equal(safeSecretMetadata(metadata(0o100444)), false);
+  assert.equal(safeSecretMetadata(metadata(0o100600)), false);
 });
 
 test("HMAC production identity uses atomic durable replay protection", async () => {

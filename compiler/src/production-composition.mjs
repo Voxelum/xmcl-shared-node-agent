@@ -106,13 +106,20 @@ async function readSecret(path, root) {
     const actual = await realpath(path);
     if (!within(root, actual)) throw new Error("secret escaped configured root");
     const metadata = await stat(actual);
-    if (!metadata.isFile() || (metadata.mode & 0o077) !== 0 || metadata.size > 64 * 1024) {
+    if (!safeSecretMetadata(metadata)) {
       throw new Error("unsafe secret permissions");
     }
     return await readFile(actual);
   } catch {
     throw new TypeError("invalid production service identity");
   }
+}
+
+export function safeSecretMetadata(metadata) {
+  if (!metadata?.isFile?.() || metadata.size > 64 * 1024) return false;
+  const permissions = metadata.mode & 0o777;
+  return permissions === 0o400 ||
+    permissions === 0o440 && metadata.uid === 0 && metadata.gid === 0;
 }
 
 function validateConfiguration(value, paths) {
