@@ -21,7 +21,7 @@ export class CompilerWorker {
     requestTimeoutMs = 30_000,
   }) {
     if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1_000 ||
-      requestTimeoutMs > 120_000) {
+      requestTimeoutMs > 900_000) {
       throw new TypeError("invalid compiler request timeout");
     }
     this.controlPlane = controlPlane;
@@ -94,6 +94,33 @@ export class CompilerWorker {
         };
       }
       const code = classifyFailure(error);
+      const detail = typeof error?.code === "string" &&
+          /^[a-z][a-z0-9_]*$/.test(error.code)
+        ? error.code
+        : typeof error?.name === "string" &&
+            /^[A-Za-z][A-Za-z0-9]*$/.test(error.name)
+        ? error.name
+        : "unknown";
+      const artifactCoordinate = typeof error?.artifactCoordinate === "string" &&
+          /^[0-9A-Za-z_.-]+:[0-9A-Za-z_.-]+:[0-9A-Za-z._+-]+(?::[0-9A-Za-z_.-]+)?$/.test(error.artifactCoordinate)
+        ? error.artifactCoordinate
+        : undefined;
+      const installerOutputReason = typeof error?.installerOutputReason === "string" &&
+          /^(?:unsafe_path|forbidden_path|reserved_path|invalid_metadata)$/.test(error.installerOutputReason)
+        ? error.installerOutputReason
+        : undefined;
+      const installerOutputPath = typeof error?.installerOutputPath === "string" &&
+          error.installerOutputPath.length <= 255 &&
+          /^[0-9A-Za-z._+/-]+$/.test(error.installerOutputPath)
+        ? error.installerOutputPath
+        : undefined;
+      console.error("xmcl compiler job failed", {
+        code,
+        detail,
+        artifactCoordinate,
+        installerOutputReason,
+        installerOutputPath,
+      });
       await this.controlPlane.failed({
         deploymentId: job?.deploymentId,
         manifestSha256: job?.manifestSha256,
@@ -402,7 +429,7 @@ function validNow(value) {
 
 async function exactRequest(fetchImpl, url, options, timeoutMs, failureCode, validateResponse) {
   if (typeof fetchImpl !== "function" || !Number.isSafeInteger(timeoutMs) ||
-    timeoutMs < 1_000 || timeoutMs > 120_000) {
+    timeoutMs < 1_000 || timeoutMs > 900_000) {
     throw new CompilerFailure(failureCode);
   }
   const controller = new AbortController();

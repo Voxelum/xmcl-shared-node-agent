@@ -37,6 +37,12 @@ export class CompilerHttpWorker {
     this.maxConcurrentJobs = validConcurrency(options.maxConcurrentJobs)
       ? options.maxConcurrentJobs
       : 1;
+    this.objectRequestTimeoutMs =
+      Number.isSafeInteger(options.objectRequestTimeoutMs) &&
+        options.objectRequestTimeoutMs >= 1_000 &&
+        options.objectRequestTimeoutMs <= 900_000
+        ? options.objectRequestTimeoutMs
+        : 30_000;
     this.allowInsecureForTests = options.allowInsecureForTests === true;
     this.activeJobs = 0;
     this.composition = createComposition(options, this.now, this.allowInsecureForTests);
@@ -82,6 +88,7 @@ export class CompilerHttpWorker {
         builder: this.composition.builder,
         fetchImpl: this.composition.fetchImpl,
         controlPlane,
+        requestTimeoutMs: this.objectRequestTimeoutMs,
       });
       return await worker.run(envelope.job);
     } finally {

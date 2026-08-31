@@ -17,6 +17,7 @@
     "processLimit": 256,
     "cpuSeconds": 240
   },
-  "artifactDownloadTimeoutMs": 30000,
+  "artifactDownloadTimeoutMs": 240000,
+  "objectRequestTimeoutMs": 900000,
   "maxConcurrentJobs": 1
 }

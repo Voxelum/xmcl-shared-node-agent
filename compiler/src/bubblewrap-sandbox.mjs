@@ -71,6 +71,11 @@ export class BubblewrapSandboxAdapter {
       "--uid", String(process.getuid()),
       "--gid", String(process.getgid()),
       "--clearenv",
+      "--tmpfs", "/",
+      "--dir", "/bin",
+      "--dir", "/usr",
+      "--proc", "/proc",
+      "--dev", "/dev",
       "--ro-bind", "/bin", "/bin",
       "--ro-bind", "/lib", "/lib",
       "--ro-bind", "/lib64", "/lib64",
@@ -396,13 +401,13 @@ async function runProcess(command, args, { timeoutMs, cwd, env }) {
     });
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new CompilerFailure("installer_failed"));
+      reject(new CompilerFailure("installer_timeout"));
     }, timeoutMs);
-    child.once("error", reject);
+    child.once("error", () => reject(new CompilerFailure("installer_spawn_failed")));
     child.once("exit", (code, signal) => {
       clearTimeout(timer);
       if (code === 0 && !signal) resolvePromise();
-      else reject(new CompilerFailure("installer_failed"));
+      else reject(new CompilerFailure("installer_process_failed"));
     });
   });
 }

@@ -81,6 +81,7 @@ export async function createProductionCompilerWorker({
       fetchImpl,
       timeoutMs: config.artifactDownloadTimeoutMs,
     }),
+    objectRequestTimeoutMs: config.objectRequestTimeoutMs,
     requestAuthenticator: identity,
     callback: {
       controlPlaneOrigin: config.callback.controlPlaneOrigin,
@@ -125,7 +126,7 @@ export function safeSecretMetadata(metadata) {
 function validateConfiguration(value, paths) {
   if (!plainObject(value) || !sameKeys(value, [
     "schemaVersion", "callback", "identity", "sandbox",
-    "artifactDownloadTimeoutMs", "maxConcurrentJobs",
+    "artifactDownloadTimeoutMs", "objectRequestTimeoutMs", "maxConcurrentJobs",
   ]) || value.schemaVersion !== 1 ||
     !plainObject(value.callback) || !sameKeys(value.callback, [
       "controlPlaneOrigin", "timeoutMs",
@@ -145,7 +146,8 @@ function validateConfiguration(value, paths) {
       PRODUCTION_OUTPUT_LIMITS.maxFileBytes) ||
     !bounded(value.sandbox.processLimit, 16, 1_024) ||
     !bounded(value.sandbox.cpuSeconds, 10, 600) ||
-    !bounded(value.artifactDownloadTimeoutMs, 1, 120_000) ||
+    !bounded(value.artifactDownloadTimeoutMs, 1, 300_000) ||
+    !bounded(value.objectRequestTimeoutMs, 1_000, 900_000) ||
     !bounded(value.maxConcurrentJobs, 1, 16)) {
     throw new TypeError("invalid production configuration");
   }

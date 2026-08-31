@@ -196,7 +196,7 @@ func (e *Executor) execute(ctx context.Context, command controlplane.Command) (c
 		if command.Connection == nil || !command.Connection.Valid() {
 			return failed("restore command requires a control-plane assigned public connection"), activePointer(active, exists), nil
 		}
-		if exists && active.AssignmentID != command.AssignmentID {
+		if exists && active.AssignmentID != command.AssignmentID && active.Phase != "stopped" {
 			return failed("a different assignment is already active for this service"), &active, nil
 		}
 		if exists && active.Phase == "running" {
@@ -212,7 +212,7 @@ func (e *Executor) execute(ctx context.Context, command controlplane.Command) (c
 			return controlplane.CommandResult{}, activePointer(active, exists), retryable(fmt.Errorf("restore workspace: %w", err))
 		}
 		starting := ActiveAssignment{AssignmentID: command.AssignmentID, Phase: "starting"}
-		if !exists || active.Phase != "starting" {
+		if !exists || active.Phase != "starting" || active.AssignmentID != command.AssignmentID {
 			if err := e.store.SetActive(command.ServiceID, starting); err != nil {
 				return controlplane.CommandResult{}, nil, err
 			}

@@ -78,7 +78,7 @@ export class ReviewedToolchainCatalog {
 export class StrictArtifactDownloader {
   constructor({ fetchImpl, timeoutMs = 30_000, maxArtifactBytes = MAX_ARTIFACT_BYTES } = {}) {
     if (typeof fetchImpl !== "function" ||
-      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000 ||
+      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000 ||
       !Number.isSafeInteger(maxArtifactBytes) || maxArtifactBytes < 1 ||
       maxArtifactBytes > MAX_ARTIFACT_BYTES) {
       throw new TypeError("invalid strict artifact downloader configuration");
@@ -137,8 +137,11 @@ export class StrictArtifactDownloader {
         }),
       ]);
     } catch (error) {
-      if (error instanceof CompilerFailure) throw error;
-      throw new CompilerFailure("artifact_download_failed");
+      const failure = error instanceof CompilerFailure
+        ? error
+        : new CompilerFailure("artifact_download_failed");
+      failure.artifactCoordinate = artifact.coordinate;
+      throw failure;
     } finally {
       clearTimeout(timeout);
     }
@@ -626,9 +629,21 @@ function normalizeSandboxOutput(result) {
   }
   const files = new Map();
   for (const [path, file] of result.files) {
-    if (!safeOutputPath(path) || forbiddenOutputPath(path) || path.startsWith(".xmcl/") ||
-      !(file.bytes instanceof Uint8Array) || !Number.isSafeInteger(file.mode)) {
-      throw new CompilerFailure("invalid_installer_output");
+    const pathIsSafe = safeOutputPath(path);
+    const reason = !pathIsSafe
+      ? "unsafe_path"
+      : forbiddenOutputPath(path)
+        ? "forbidden_path"
+        : path.startsWith(".xmcl/")
+          ? "reserved_path"
+          : !(file.bytes instanceof Uint8Array) || !Number.isSafeInteger(file.mode)
+            ? "invalid_metadata"
+            : undefined;
+    if (reason) {
+      const failure = new CompilerFailure("invalid_installer_output");
+      failure.installerOutputReason = reason;
+      failure.installerOutputPath = pathIsSafe ? path : undefined;
+      throw failure;
     }
     files.set(path, { bytes: file.bytes, mode: file.mode });
   }
@@ -976,7 +991,7 @@ function safeOutputPath(path) {
 
 function forbiddenOutputPath(path) {
   const lower = path.toLowerCase();
-  return /(?:^|\/)(?:eula\.txt|java(?:w)?(?:\.exe)?)(?:$|\/)/.test(lower) ||
+  return /(?:^|\/)(?:eula\.txt|java(?:w)?(?:\.exe)?)$/.test(lower) ||
     /(?:^|\/)(?:jre|jdk)(?:\/|$)/.test(lower) ||
     /\.(?:sh|bat|cmd|ps1|exe)$/i.test(path);
 }

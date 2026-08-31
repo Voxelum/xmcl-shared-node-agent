@@ -186,6 +186,37 @@ func TestDifferentAssignmentIsRejectedWhileServiceActive(t *testing.T) {
 	}
 }
 
+func TestDifferentAssignmentReplacesStoppedService(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workspace, runtime := &fakeWorkspace{}, &fakeRuntime{}
+	executor := NewExecutor("node_1", store, workspace, runtime)
+	first := testCommand(controlplane.RestoreAndStart, "start_1", "node_1", "assignment_1")
+	if _, err := executor.Execute(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	stop := testCommand(controlplane.StopAndSync, "stop_1", "node_1", "assignment_1")
+	if result, err := executor.Execute(context.Background(), stop); err != nil || result.Status != "stopped" {
+		t.Fatalf("stop result = %#v, %v", result, err)
+	}
+
+	second := testCommand(controlplane.RestoreAndStart, "start_2", "node_1", "assignment_2")
+	result, err := executor.Execute(context.Background(), second)
+	if err != nil || result.Status != "started" {
+		t.Fatalf("replacement start result = %#v, %v", result, err)
+	}
+	active, exists, err := store.Active(second.ServiceID)
+	if err != nil || !exists || active.AssignmentID != second.AssignmentID || active.Phase != "running" {
+		t.Fatalf("replacement active state = %#v exists=%v err=%v", active, exists, err)
+	}
+	if workspace.restores != 2 || runtime.starts != 2 {
+		t.Fatalf("replacement calls = restores:%d starts:%d", workspace.restores, runtime.starts)
+	}
+}
+
 func TestStartingStateResumesWithoutReplacingWorkspace(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	if err != nil {

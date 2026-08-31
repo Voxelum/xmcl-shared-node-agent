@@ -548,7 +548,9 @@ func (m *Manager) buildManifest(stagingBase, prefix string, command controlplane
 	var archives []archive
 	var content archive
 	var err error
-	if previous.Content != nil && isCompilerContent(*previous.Content) {
+	if command.RuntimeContent != nil {
+		content.descriptor = *command.RuntimeContent
+	} else if previous.Content != nil && isCompilerContent(*previous.Content) {
 		// A compiler-selected layer is immutable. User process changes must never
 		// republish or replace it during world/config sync.
 		content.descriptor = *previous.Content

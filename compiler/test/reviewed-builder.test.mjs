@@ -286,7 +286,8 @@ test("strict artifact downloader rejects wrong hosts, redirects, oversize payloa
   });
   await assert.rejects(
     () => timedOut.download(artifact, { approvedHosts: ["toolchain.example"] }),
-    /artifact_download_timeout/,
+    (error) => error?.code === "artifact_download_timeout" &&
+      error.artifactCoordinate === artifact.coordinate,
   );
 });
 
@@ -302,6 +303,11 @@ test("installer failure and unsafe sandbox output produce no immutable archive",
     }).build(buildInput(fixture)),
     /invalid_installer_output/,
   );
+  const javaGroupLibrary = "libraries/net/java/dev/jna/jna/5.14.0/jna-5.14.0.jar";
+  const built = await builderFor(fixture, {
+    files: new Map([[javaGroupLibrary, { bytes: bytes("reviewed library"), mode: 0o644 }]]),
+  }).build(buildInput(fixture));
+  assert.ok(built.content.entries.some((entry) => entry.path === javaGroupLibrary));
 });
 
 test("reviewed content is deterministic and excludes launcher-supplied shell, EULA, and Java files", async () => {
@@ -321,5 +327,5 @@ test("reviewed content is deterministic and excludes launcher-supplied shell, EU
   assert.ok(first.content.entries.every((entry) =>
     entry.path === ".xmcl/launch.sh" || !/\.(?:sh|bat|cmd|ps1|exe)$/i.test(entry.path),
   ));
-  assert.ok(first.content.entries.every((entry) => !/(?:^|\/)(?:eula\.txt|java(?:w)?(?:\.exe)?)(?:$|\/)/i.test(entry.path)));
+  assert.ok(first.content.entries.every((entry) => !/(?:^|\/)(?:eula\.txt|java(?:w)?(?:\.exe)?)$/i.test(entry.path)));
 });
