@@ -15,7 +15,10 @@ server.listen(port, host, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
-    server.close(() => process.exit(0));
+    server.close(async () => {
+      await worker?.stop().catch(() => undefined);
+      process.exit(0);
+    });
     setTimeout(() => process.exit(1), 10_000).unref();
   });
 }

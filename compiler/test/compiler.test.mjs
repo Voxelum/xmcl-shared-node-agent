@@ -57,7 +57,11 @@ function fixture({ includeEula = false } = {}) {
       javaRequirement: { component: "java-runtime-delta", major: 21 },
       runtimeCatalog: { sha256: catalog },
     }) },
-    { path: "resolved/mods.json", bytes: json([]) },
+    { path: "resolved/mods.json", bytes: json([{
+      path: mod.path,
+      sha256: sha(mod.bytes),
+      sizeBytes: mod.bytes.length,
+    }]) },
     { path: "resolved/artifacts.json", bytes: json({
       schemaVersion: 1,
       artifacts: [{
@@ -112,6 +116,7 @@ function fixture({ includeEula = false } = {}) {
         java: { component: "java-runtime-delta", major: 21 },
         runtimeCatalog: { sha256: catalog },
       },
+      mods: [],
     },
   };
   const grants = {

@@ -44,6 +44,7 @@ export async function validateBundle(archive, frozenManifest) {
     if (!entries.has(required)) throw new CompilerFailure("missing_resolved_metadata");
   }
   verifyResolvedMetadata(entries, manifest);
+  verifyResolvedMods(entries, manifest, frozenManifest);
   return { manifest, entries };
 }
 
@@ -141,6 +142,99 @@ function verifyResolvedMetadata(entries, manifest) {
   } catch {
     throw new CompilerFailure("resolved_metadata_mismatch");
   }
+}
+
+function verifyResolvedMods(entries, manifest, frozenManifest) {
+    let declarations;
+    try {
+      declarations = JSON.parse(decoder.decode(entries.get("resolved/mods.json").bytes));
+    } catch {
+      throw new CompilerFailure("resolved_mods_mismatch");
+    }
+    if (!Array.isArray(declarations) || !Array.isArray(frozenManifest?.mods)) {
+      throw new CompilerFailure("resolved_mods_mismatch");
+    }
+    const local = new Map(manifest.files
+      .filter((file) => file.path.startsWith("instance/mods/"))
+      .map((file) => [file.path, file]));
+    const remote = new Map();
+    for (const mod of frozenManifest.mods) {
+      validateFrozenRemoteMod(mod);
+      const path = `instance/mods/${mod.filename}`;
+      if (remote.has(path) || local.has(path)) {
+        throw new CompilerFailure("remote_mod_collision");
+      }
+      remote.set(path, mod);
+    }
+    const seen = new Set();
+    for (const declaration of declarations) {
+      if (!plainObject(declaration) || typeof declaration.path !== "string" ||
+        seen.has(declaration.path) || !validSha256(declaration.sha256) ||
+        !Number.isSafeInteger(declaration.sizeBytes) || declaration.sizeBytes < 1) {
+        throw new CompilerFailure("resolved_mods_mismatch");
+      }
+      seen.add(declaration.path);
+      if (declaration.source === undefined) {
+        if (!sameKeys(declaration, ["path", "sha256", "sizeBytes"])) {
+          throw new CompilerFailure("resolved_mods_mismatch");
+        }
+        const expected = local.get(declaration.path);
+        if (!expected || expected.sha256 !== declaration.sha256.toLowerCase() ||
+          expected.sizeBytes !== declaration.sizeBytes) {
+          throw new CompilerFailure("resolved_mods_mismatch");
+        }
+        continue;
+      }
+      if (!sameKeys(declaration, ["filename", "path", "sha256", "sizeBytes", "source"]) ||
+        declaration.path !== `instance/mods/${declaration.filename}` ||
+        !safeModFilename(declaration.filename) || !plainObject(declaration.source)) {
+        throw new CompilerFailure("resolved_mods_mismatch");
+      }
+      const expected = remote.get(declaration.path);
+      const source = declaration.source;
+      const matchesSource = expected?.provider === "modrinth"
+        ? sameKeys(source, ["projectId", "provider", "versionId"]) &&
+          source.provider === "modrinth" &&
+          source.projectId === expected.projectId &&
+          source.versionId === expected.fileId
+        : expected?.provider === "curseforge"
+          ? sameKeys(source, ["fileId", "projectId", "provider"]) &&
+            source.provider === "curseforge" &&
+            String(source.projectId) === expected.projectId &&
+            String(source.fileId) === expected.fileId
+          : false;
+      if (!expected || !matchesSource || expected.filename !== declaration.filename ||
+        expected.sha256 !== declaration.sha256.toLowerCase() ||
+        expected.sizeBytes !== declaration.sizeBytes) {
+        throw new CompilerFailure("resolved_mods_mismatch");
+      }
+    }
+    if (seen.size !== local.size + remote.size ||
+      [...local.keys(), ...remote.keys()].some((path) => !seen.has(path))) {
+      throw new CompilerFailure("resolved_mods_mismatch");
+    }
+  }
+
+function validateFrozenRemoteMod(mod) {
+    if (!plainObject(mod) ||
+      !sameKeys(mod, [
+        "downloadUrl", "fileId", "filename", "projectId", "provider", "sha256",
+        "sizeBytes",
+      ]) ||
+      !["modrinth", "curseforge"].includes(mod.provider) ||
+      typeof mod.projectId !== "string" || !mod.projectId ||
+      typeof mod.fileId !== "string" || !mod.fileId ||
+      !safeModFilename(mod.filename) || !validSha256(mod.sha256) ||
+      !Number.isSafeInteger(mod.sizeBytes) || mod.sizeBytes < 1 ||
+      typeof mod.downloadUrl !== "string") {
+      throw new CompilerFailure("invalid_remote_mod");
+    }
+  }
+
+function safeModFilename(value) {
+    return typeof value === "string" && value.length > 0 && value.length <= 255 &&
+      !value.includes("/") && !value.includes("\\") && !value.includes("\0") &&
+      value.toLowerCase().endsWith(".jar");
 }
 
 function validArtifactMetadata(value, manifest) {
@@ -284,6 +378,13 @@ function validMinecraftVersion(value) {
 
 function plainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function sameKeys(value, expected) {
+  const keys = Object.keys(value).sort();
+  const sorted = [...expected].sort();
+  return keys.length === sorted.length &&
+    keys.every((key, index) => key === sorted[index]);
 }
 
 function sha256(bytes) {

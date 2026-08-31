@@ -15,7 +15,7 @@ Environment=PORT=8080
 LoadCredential=service-hmac-secret:/etc/xmcl-compiler/service-hmac-secret
 RuntimeDirectory=xmcl-compiler/workspaces
 RuntimeDirectoryMode=0700
-StateDirectory=xmcl-compiler/replay
+StateDirectory=xmcl-compiler/replay xmcl-compiler/jobs
 StateDirectoryMode=0700
 UMask=0077
 Restart=on-failure
@@ -37,7 +37,7 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 ReadOnlyPaths=/etc/xmcl-compiler /opt/xmcl-compiler /opt/xmcl/jres
-ReadWritePaths=/run/xmcl-compiler/workspaces /var/lib/xmcl-compiler/replay
+ReadWritePaths=/run/xmcl-compiler/workspaces /var/lib/xmcl-compiler/replay /var/lib/xmcl-compiler/jobs
 MemoryMax=3200M
 MemorySwapMax=0
 TasksMax=512

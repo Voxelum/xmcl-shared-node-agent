@@ -60,11 +60,12 @@ or completed runtime worlds.
 - Run the supported host systemd unit as UID/GID 10001 with its read-only
   application/config/JRE paths, ephemeral workspace, persistent replay path,
   empty capability sets, and PID/CPU/memory limits.
-- Use the control-plane-compatible HMAC service identity for queue submissions
-  and the three callbacks: durable upload preparation, immutable publish, and
-  durable failure reporting. The initial closed envelope already carries both
-  exact object grants; the compiler does not call a grants route. Do not inject
-  browser, node, billing, or object-store master credentials.
+- Use the control-plane-compatible HMAC service identity for queue submissions,
+  exact grant refresh, durable upload preparation, immutable publish, and
+  durable failure reporting. The initial closed envelope carries no authority
+  beyond its short-lived submission; each processing attempt obtains fresh,
+  deployment-bound object grants through the authenticated grants route. Do
+  not inject browser, node, billing, or object-store master credentials.
 - Permit worker HTTPS egress only to the callback/object grants and reviewed
   artifact origins. Bubblewrap unshares the network namespace before any
   installer code executes.
@@ -166,12 +167,19 @@ or publish an image, upload content, or provision infrastructure.
 | --- | --- |
 | `GET /healthz` | unauthenticated liveness only; returns 200 even when compilation is fail-closed |
 | `GET /readyz` | returns 200 only after every reviewed dependency and identity adapter is configured |
-| `POST /v1/compiler-jobs` | authenticated synchronous queue-message consumption |
+| `POST /v1/compiler-jobs` | authenticate, validate, durably enqueue, then return an exact 202 acknowledgement |
 
-The HTTP response acknowledges only after the worker has attempted the
-immutable upload and the authenticated callback. Before the PUT, the worker
-posts its reviewed content digest and descriptor to the code-owned
-`upload-prepared` deployment route.
+The HTTP response returns `202 {"status":"accepted","deploymentId":"..."}`
+only after the exact envelope has been atomically persisted and synced. A
+bounded background worker claims persisted jobs, resumes pending/running work
+after service restart, and archives a job only after a terminal callback is
+durable. Failed or uncertain attempts remain queued with bounded exponential
+backoff. Before each attempt, the worker requests fresh exact GET/PUT grants;
+the short-lived grants in the submission envelope are never reused after
+acceptance.
+
+Before the PUT, the worker posts its reviewed content digest and descriptor to
+the code-owned `upload-prepared` deployment route.
 The control plane durably binds that exact payload and returns a single-key GET
 reconciliation grant. A 200 response with
 `{"status":"failed"}` means the control-plane failure callback was attempted;
@@ -216,8 +224,9 @@ rejected):
 
 `requestId`, `job.compilerRequestId`, and `grants.compilerRequestId` must be
 identical. The envelope lifetime is at most five minutes. Before any download
-or sandbox call, the worker reuses `validateCompilerJob` and `verifyGrantSet`
-to bind account, service, deployment, manifest SHA, input archive key, output
+or sandbox call, the worker posts the exact compiler request and deployment
+identity to the authenticated grants route, then reuses `verifyGrantSet` to
+bind account, service, deployment, manifest SHA, input archive key, output
 key, GET/PUT methods, HTTPS grant URLs, unexpired grant timestamps, no input
 headers, and exactly `If-None-Match: *` on the output grant, optionally with
 Azure's exact `x-ms-blob-type: BlockBlob`. It then reuses the
@@ -238,6 +247,7 @@ compiler-owned code derives exactly these paths:
 
 ```text
 /v1/internal/shared-runtime-compiler/deployments/{deploymentId}/upload-prepared
+/v1/internal/shared-runtime-compiler/deployments/{deploymentId}/grants
 /v1/internal/shared-runtime-compiler/deployments/{deploymentId}/published
 /v1/internal/shared-runtime-compiler/deployments/{deploymentId}/failed
 ```
@@ -393,6 +403,7 @@ Prepare these exact host paths:
 | `/opt/xmcl/jres` | exact JRE roots on a read-only `nosuid,nodev` mount |
 | `/run/xmcl-compiler/workspaces` | systemd-created ephemeral mode 0700, UID/GID 10001 |
 | `/var/lib/xmcl-compiler/replay` | systemd-created persistent mode 0700, UID/GID 10001 |
+| `/var/lib/xmcl-compiler/jobs` | systemd-created persistent queue/archive mode 0700, UID/GID 10001 |
 
 Install the unit at `/etc/systemd/system/xmcl-compiler.service`, run
 `systemd-analyze verify` on it, then `systemctl daemon-reload` and
@@ -401,7 +412,7 @@ only inside the service credential directory. The source remains mode 0400;
 systemd may materialize the root-owned credential as mode 0440, which is the
 only group-readable secret mode the worker accepts. `ProtectSystem=strict`, empty
 capability sets, private devices/tmp, read-only code/config/JRE paths, and
-explicit writable workspace/replay paths keep the host composition
+explicit writable workspace/replay/job paths keep the host composition
 fail-closed. The unit deliberately does not apply a broad syscall filter:
 Bubblewrap requires namespace-local mount syscalls, while its own
 `--unshare-all` disables installer networking. `/readyz` must return 200 before

@@ -15,6 +15,7 @@ import {
   readBoundedCallbackBody,
 } from "../src/http-worker.mjs";
 import { HmacServiceIdentity, InMemoryReplayCache } from "../src/service-identity.mjs";
+import { MemoryCompilerJobQueue } from "../src/job-queue.mjs";
 
 const encoder = new TextEncoder();
 
@@ -35,7 +36,17 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
       });
       const event = JSON.parse(new TextDecoder().decode(body));
       callbackPaths.push(request.url);
-      if (event.status === "upload_prepared") {
+      if (request.url.endsWith("/grants")) {
+        assert.deepEqual(Object.keys(event).sort(),
+          ["compilerRequestId", "deploymentId", "schemaVersion"].sort());
+        assert.equal(event.schemaVersion, 1);
+        assert.equal(event.deploymentId, fixture.job.deploymentId);
+        response.writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify({
+            ...fixture.grants,
+            compilerRequestId: event.compilerRequestId,
+          }));
+      } else if (event.status === "upload_prepared") {
         response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
           schemaVersion: 1,
           status: "upload_prepared",
@@ -66,6 +77,7 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
   const requestVerifier = identity("control-plane", secret);
   const requestSigner = identity("control-plane", secret);
   const callbackSigner = identity("callback", secret);
+  const jobQueue = new MemoryCompilerJobQueue();
   const worker = new CompilerHttpWorker({
     ...reviewedDependencies(fixture, sandboxAdapter),
     requestAuthenticator: requestVerifier,
@@ -74,30 +86,50 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
       authenticator: callbackSigner,
     },
     fetchImpl: objectStore(fixture),
+    jobQueue,
     allowInsecureForTests: true,
   });
+  t.after(() => worker.stop());
   assert.equal(worker.health().ready, true);
   const server = createCompilerHttpServer({ worker });
   const address = await listen(server);
   t.after(() => close(server));
 
   const envelope = messageFor(fixture);
+  envelope.grants = structuredClone(envelope.grants);
+  for (const grant of envelope.grants.grants) {
+    grant.expiresAt = "2000-01-01T00:00:00.000Z";
+  }
   const first = await postSigned({
     url: `http://127.0.0.1:${address.port}/v1/compiler-jobs`,
     signer: requestSigner,
     envelope,
   });
-  assert.equal(first.status, 200);
-  assert.deepEqual(await first.json(), { status: "published", deploymentId: fixture.job.deploymentId });
+  assert.equal(first.status, 202);
+  assert.deepEqual(await first.json(), { status: "accepted", deploymentId: fixture.job.deploymentId });
+  await waitFor(() => callbackEvents.length === 1);
   assert.equal(sandboxAdapter.calls.length, 1);
   assert.equal(callbackEvents.length, 1);
   assert.equal(callbackEvents[0].status, "published");
   assert.equal(callbackEvents[0].compilerRequestId, fixture.job.compilerRequestId);
   assert.equal(callbackEvents[0].content.key, fixture.job.expectedContentKey);
   assert.deepEqual(callbackPaths, [
+    `/v1/internal/shared-runtime-compiler/deployments/${fixture.job.deploymentId}/grants`,
     `/v1/internal/shared-runtime-compiler/deployments/${fixture.job.deploymentId}/upload-prepared`,
     `/v1/internal/shared-runtime-compiler/deployments/${fixture.job.deploymentId}/published`,
   ]);
+
+  const duplicate = await postSigned({
+    url: `http://127.0.0.1:${address.port}/v1/compiler-jobs`,
+    signer: requestSigner,
+    envelope,
+  });
+  assert.equal(duplicate.status, 202);
+  assert.deepEqual(await duplicate.json(), {
+    status: "accepted",
+    deploymentId: fixture.job.deploymentId,
+  });
+  assert.equal(sandboxAdapter.calls.length, 1);
 
   const replay = await postSigned({
     url: `http://127.0.0.1:${address.port}/v1/compiler-jobs`,
@@ -122,26 +154,32 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
   assert.equal(callbackEvents.length, 1);
 
   const invalidGrants = structuredClone(envelope);
+  invalidGrants.requestId = "request_invalid_grants";
+  invalidGrants.job.compilerRequestId = invalidGrants.requestId;
+  invalidGrants.grants.compilerRequestId = invalidGrants.requestId;
   invalidGrants.grants.grants[1].key = "shared-hosting/other/output.tar.zst";
   const failed = await postSigned({
     url: `http://127.0.0.1:${address.port}/v1/compiler-jobs`,
     signer: requestSigner,
     envelope: invalidGrants,
   });
-  assert.equal(failed.status, 200);
-  assert.deepEqual(await failed.json(), { status: "failed", code: "compiler_failed" });
-  assert.equal(sandboxAdapter.calls.length, 1);
+  assert.equal(failed.status, 202);
+  assert.deepEqual(await failed.json(), {
+    status: "accepted",
+    deploymentId: fixture.job.deploymentId,
+  });
+  await waitFor(() => callbackEvents.length === 2);
+  assert.equal(sandboxAdapter.calls.length, 2);
   assert.equal(callbackEvents.length, 2);
   assert.equal(callbackPaths.at(-1),
-    `/v1/internal/shared-runtime-compiler/deployments/${fixture.job.deploymentId}/failed`);
-  assert.deepEqual(callbackEvents[1], {
-    schemaVersion: 1,
-    status: "failed",
-    compilerRequestId: fixture.job.compilerRequestId,
-    deploymentId: fixture.job.deploymentId,
-    manifestSha256: fixture.job.manifestSha256,
-    code: "compiler_failed",
-  });
+    `/v1/internal/shared-runtime-compiler/deployments/${fixture.job.deploymentId}/published`);
+  assert.equal(callbackEvents[1].status, "published");
+  assert.equal(callbackEvents[1].compilerRequestId, invalidGrants.requestId);
+  assert.equal(callbackEvents[1].deploymentId, fixture.job.deploymentId);
+  assert.equal(callbackEvents[1].manifestSha256, fixture.job.manifestSha256);
+  assert.deepEqual(callbackEvents[1].content, callbackEvents[0].content);
+  assert.deepEqual(callbackEvents[1].descriptor, callbackEvents[0].descriptor);
+  assert.deepEqual(await jobQueue.counts(), { pending: 0, archived: 2 });
 });
 
 test("default HTTP composition remains fail closed while serving liveness", async (t) => {
@@ -160,6 +198,175 @@ test("default HTTP composition remains fail closed while serving liveness", asyn
   });
   assert.equal(job.status, 503);
   assert.deepEqual(await job.json(), { code: "compiler_unavailable" });
+});
+
+test("authenticated submissions return 202 before queued compilation completes", async (t) => {
+  const fixture = compilerFixture();
+  const secret = "local-integration-test-secret-must-be-32-bytes";
+  const sandbox = new DeterministicFakeSandboxRunner();
+  const assemble = sandbox.assemble.bind(sandbox);
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  sandbox.assemble = async (request) => {
+    await gate;
+    return await assemble(request);
+  };
+  const worker = new CompilerHttpWorker({
+    ...reviewedDependencies(fixture, sandbox),
+    requestAuthenticator: identity("control-plane", secret),
+    callback: {
+      controlPlaneOrigin: "https://control-plane.example",
+      authenticator: identity("callback", secret),
+      fetchImpl: async (url) => {
+        if (url.endsWith("/grants")) {
+          return Response.json(fixture.grants);
+        }
+        throw new Error("callback unavailable");
+      },
+    },
+    fetchImpl: objectStore(fixture),
+    jobQueue: new MemoryCompilerJobQueue({ retryDelayMs: 10_000 }),
+    allowInsecureForTests: true,
+  });
+  t.after(async () => {
+    release();
+    await worker.stop();
+  });
+  const server = createCompilerHttpServer({ worker });
+  const address = await listen(server);
+  t.after(() => close(server));
+  const response = await postSigned({
+    url: `http://127.0.0.1:${address.port}/v1/compiler-jobs`,
+    signer: identity("control-plane", secret),
+    envelope: messageFor(fixture),
+  });
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), {
+    status: "accepted",
+    deploymentId: fixture.job.deploymentId,
+  });
+  await waitFor(() => worker.health().activeJobs === 1);
+  assert.equal(sandbox.calls.length, 0);
+  release();
+});
+
+test("invalid authentication and envelopes are rejected before durable enqueue", async (t) => {
+  const fixture = compilerFixture();
+  const secret = "local-integration-test-secret-must-be-32-bytes";
+  const queue = new MemoryCompilerJobQueue();
+  const worker = new CompilerHttpWorker({
+    ...reviewedDependencies(fixture, new DeterministicFakeSandboxRunner()),
+    requestAuthenticator: identity("control-plane", secret),
+    callback: {
+      controlPlaneOrigin: "https://control-plane.example",
+      authenticator: identity("callback", secret),
+    },
+    fetchImpl: objectStore(fixture),
+    jobQueue: queue,
+    allowInsecureForTests: true,
+  });
+  t.after(() => worker.stop());
+  const server = createCompilerHttpServer({ worker });
+  const address = await listen(server);
+  t.after(() => close(server));
+  const url = `http://127.0.0.1:${address.port}/v1/compiler-jobs`;
+
+  const unauthorized = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(unauthorized.status, 401);
+  assert.deepEqual(await queue.counts(), { pending: 0, archived: 0 });
+
+  const invalid = await postSigned({
+    url,
+    signer: identity("control-plane", secret),
+    envelope: { schemaVersion: 1, requestId: "invalid" },
+  });
+  assert.equal(invalid.status, 400);
+  assert.deepEqual(await queue.counts(), { pending: 0, archived: 0 });
+});
+
+test("malformed fresh grants fail closed while the durable job remains retryable", async (t) => {
+  const fixture = compilerFixture();
+  const secret = "local-integration-test-secret-must-be-32-bytes";
+  const queue = new MemoryCompilerJobQueue({ retryDelayMs: 10_000 });
+  let grantMode = "malformed";
+  let grantRequests = 0;
+  const callbackEvents = [];
+  const worker = new CompilerHttpWorker({
+    ...reviewedDependencies(fixture, new DeterministicFakeSandboxRunner()),
+    requestAuthenticator: identity("control-plane", secret),
+    callback: {
+      controlPlaneOrigin: "https://control-plane.example",
+      authenticator: identity("callback", secret),
+      fetchImpl: async (url, options) => {
+        const event = JSON.parse(new TextDecoder().decode(options.body));
+        if (url.endsWith("/grants")) {
+          grantRequests += 1;
+          if (grantMode === "malformed") return new Response("{");
+          if (grantMode === "mismatched") {
+            return Response.json({
+              ...fixture.grants,
+              deploymentId: "deployment_other",
+            });
+          }
+          return Response.json(fixture.grants);
+        }
+        if (url.endsWith("/upload-prepared")) {
+          return Response.json({
+            schemaVersion: 1,
+            status: "upload_prepared",
+            compilerRequestId: event.compilerRequestId,
+            deploymentId: event.deploymentId,
+            manifestSha256: event.manifestSha256,
+            content: event.content,
+            descriptor: event.descriptor,
+            reconciliation: {
+              key: event.content.key,
+              method: "GET",
+              url: "https://object.example/reconcile",
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+          });
+        }
+        if (url.endsWith("/published")) {
+          callbackEvents.push(event);
+          return new Response(null, { status: 204 });
+        }
+        assert.fail("grant refresh failure must not emit a terminal callback");
+      },
+    },
+    fetchImpl: objectStore(fixture),
+    jobQueue: queue,
+    allowInsecureForTests: true,
+  });
+  t.after(() => worker.stop());
+  const server = createCompilerHttpServer({ worker });
+  const address = await listen(server);
+  t.after(() => close(server));
+  const url = `http://127.0.0.1:${address.port}/v1/compiler-jobs`;
+  const signer = identity("control-plane", secret);
+  const envelope = messageFor(fixture);
+
+  for (const mode of ["malformed", "mismatched"]) {
+    grantMode = mode;
+    const response = await postSigned({ url, signer, envelope });
+    assert.equal(response.status, 202);
+    await waitFor(() => grantRequests >= (mode === "malformed" ? 1 : 2) &&
+      worker.health().activeJobs === 0);
+    assert.deepEqual(await queue.counts(), { pending: 1, archived: 0 });
+  }
+
+  grantMode = "valid";
+  const recovered = await postSigned({ url, signer, envelope });
+  assert.equal(recovered.status, 202);
+  await waitFor(async () => (await queue.counts()).archived === 1);
+  assert.equal(callbackEvents.length, 1);
+  assert.equal(callbackEvents[0].status, "published");
 });
 
 test("chunked upload preparation is incrementally read below 4 MiB", async () => {
@@ -373,7 +580,10 @@ test("a published callback with a lost response never emits a failed callback", 
       body,
     });
     const event = JSON.parse(new TextDecoder().decode(body));
-    if (event.status === "upload_prepared") {
+    if (request.url.endsWith("/grants")) {
+      response.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify(fixture.grants));
+    } else if (event.status === "upload_prepared") {
       response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
         schemaVersion: 1,
         status: "upload_prepared",
@@ -413,8 +623,10 @@ test("a published callback with a lost response never emits a failed callback", 
       },
     },
     fetchImpl: objectStore(fixture),
+    jobQueue: new MemoryCompilerJobQueue({ retryDelayMs: 10_000 }),
     allowInsecureForTests: true,
   });
+  t.after(() => worker.stop());
   const server = createCompilerHttpServer({ worker });
   const address = await listen(server);
   t.after(() => close(server));
@@ -424,15 +636,15 @@ test("a published callback with a lost response never emits a failed callback", 
     signer: identity("control-plane", secret),
     envelope: messageFor(fixture),
   });
-  assert.equal(response.status, 200);
-  const result = await response.json();
-  assert.equal(result.status, "published_callback_uncertain");
-  assert.equal(result.deploymentId, fixture.job.deploymentId);
-  assert.equal(result.manifestSha256, fixture.job.manifestSha256);
-  assert.equal(result.content.key, fixture.job.expectedContentKey);
-  assert.equal(result.descriptor.launch.path, ".xmcl/launch.sh");
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), {
+    status: "accepted",
+    deploymentId: fixture.job.deploymentId,
+  });
+  await waitFor(() => callbackEvents.length === 1);
   assert.equal(sandboxAdapter.calls.length, 1);
   assert.deepEqual(callbackEvents.map((event) => event.status), ["published"]);
+  assert.deepEqual(await worker.queue.counts(), { pending: 1, archived: 0 });
 });
 
 function reviewedDependencies(fixture, sandboxAdapter) {
@@ -485,7 +697,11 @@ function compilerFixture() {
       javaRequirement: { component: "java-runtime-delta", major: 21 },
       runtimeCatalog: { sha256: catalog },
     }) },
-    { path: "resolved/mods.json", bytes: json([]) },
+    { path: "resolved/mods.json", bytes: json([{
+      path: mod.path,
+      sha256: sha(mod.bytes),
+      sizeBytes: mod.bytes.length,
+    }]) },
     { path: "resolved/artifacts.json", bytes: json({
       schemaVersion: 1,
       artifacts: [{ intent: "mod", path: mod.path, sha256: sha(mod.bytes), sizeBytes: mod.bytes.length }],
@@ -530,6 +746,7 @@ function compilerFixture() {
         java: { component: "java-runtime-delta", major: 21 },
         runtimeCatalog: { sha256: catalog },
       },
+      mods: [],
     },
   };
   const expiresAt = new Date(Date.now() + 60_000).toISOString();
@@ -638,6 +855,14 @@ function json(value) {
 
 function sha(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for compiler job");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 function u16(out, value) {

@@ -12,6 +12,7 @@ import {
   HmacServiceIdentity,
 } from "./service-identity.mjs";
 import { PRODUCTION_OUTPUT_LIMITS } from "./production-limits.mjs";
+import { FilesystemCompilerJobQueue } from "./job-queue.mjs";
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -22,6 +23,7 @@ export const PRODUCTION_PATHS = Object.freeze({
   jreRoot: "/opt/xmcl/jres",
   workspaceRoot: "/run/xmcl-compiler/workspaces",
   replayRoot: "/var/lib/xmcl-compiler/replay",
+  queueRoot: "/var/lib/xmcl-compiler/jobs",
   secretsRoot: "/run/credentials/xmcl-compiler.service",
   bubblewrap: "/usr/bin/bwrap",
   prlimit: "/usr/bin/prlimit",
@@ -73,7 +75,7 @@ export async function createProductionCompilerWorker({
     runner: sandboxRunner,
   });
   await sandbox.initialize();
-  return new CompilerHttpWorker({
+  const worker = new CompilerHttpWorker({
     toolchainCatalog: catalog,
     verifiedJres: registry,
     sandboxAdapter: sandbox,
@@ -91,7 +93,12 @@ export async function createProductionCompilerWorker({
     },
     fetchImpl,
     maxConcurrentJobs: config.maxConcurrentJobs,
+    jobQueue: new FilesystemCompilerJobQueue({
+      directory: paths.queueRoot,
+    }),
   });
+  await worker.start();
+  return worker;
 }
 
 async function loadJson(path) {
@@ -157,6 +164,7 @@ function validatePathSet(paths) {
   if (!plainObject(paths) || !sameKeys(paths, Object.keys(PRODUCTION_PATHS)) ||
     Object.values(paths).some((path) => !absoluteNormalizedPath(path)) ||
     !within(paths.jreRoot, `${paths.jreRoot}${sep}probe`) ||
+    !within(paths.queueRoot, `${paths.queueRoot}${sep}probe`) ||
     !within(paths.secretsRoot, `${paths.secretsRoot}${sep}probe`)) {
     throw new TypeError("invalid production paths");
   }

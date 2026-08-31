@@ -146,6 +146,64 @@ export class StrictArtifactDownloader {
       clearTimeout(timeout);
     }
   }
+
+  async downloadRemoteMod(mod) {
+      validateRemoteMod(mod, this.maxArtifactBytes);
+      const controller = new AbortController();
+      let timeout;
+      try {
+        const download = async () => {
+          const response = await this.fetchImpl(mod.downloadUrl, {
+            method: "GET",
+            headers: { "accept-encoding": "identity" },
+            redirect: "error",
+            credentials: "omit",
+            referrerPolicy: "no-referrer",
+            signal: controller.signal,
+          });
+          if (!response || response.status !== 200 || response.redirected) {
+            throw new CompilerFailure("remote_mod_download_failed");
+          }
+          if (response.url &&
+            new URL(response.url).href !== new URL(mod.downloadUrl).href) {
+            throw new CompilerFailure("remote_mod_redirect_rejected");
+          }
+          const contentEncoding = response.headers?.get("content-encoding");
+          if (contentEncoding && contentEncoding.toLowerCase() !== "identity") {
+            throw new CompilerFailure("remote_mod_download_failed");
+          }
+          const contentLength = response.headers?.get("content-length");
+          if (!/^(?:0|[1-9]\d*)$/.test(contentLength ?? "") ||
+            Number(contentLength) !== mod.sizeBytes) {
+            throw new CompilerFailure("remote_mod_size_mismatch");
+          }
+          const bytes = await readExactResponse(
+            response,
+            mod.sizeBytes,
+            this.maxArtifactBytes,
+          );
+          if (sha256(bytes) !== mod.sha256) {
+            throw new CompilerFailure("remote_mod_hash_mismatch");
+          }
+          return bytes;
+        };
+        return await Promise.race([
+          download(),
+          new Promise((_, reject) => {
+            timeout = setTimeout(() => {
+              controller.abort();
+              reject(new CompilerFailure("remote_mod_download_timeout"));
+            }, this.timeoutMs);
+          }),
+        ]);
+      } catch (error) {
+        throw error instanceof CompilerFailure
+          ? error
+          : new CompilerFailure("remote_mod_download_failed");
+      } finally {
+        clearTimeout(timeout);
+    }
+  }
 }
 
 /**
@@ -221,6 +279,11 @@ export class ReviewedRuntimeBuilder {
     }
     const files = normalizeSandboxOutput(installed);
     copyValidatedBundleContent(files, bundle);
+    await addRemoteMods(
+      files,
+      frozenManifest?.mods,
+      this.artifactDownloader,
+    );
 
     const runtime = runtimeDescriptor(toolchain, plan);
     addGeneratedFile(files, ".xmcl/runtime.json", encodeJson(runtime), 0o644);
@@ -267,6 +330,17 @@ export class DeterministicFakeArtifactDownloader {
     this.calls.push(artifact.coordinate);
     const bytes = this.artifacts.get(artifact.coordinate);
     if (!(bytes instanceof Uint8Array)) throw new CompilerFailure("artifact_download_failed");
+    return bytes.slice();
+  }
+
+  async downloadRemoteMod(mod) {
+    validateRemoteMod(mod, MAX_ARTIFACT_BYTES);
+    const coordinate = `remote:${mod.provider}:${mod.projectId}:${mod.fileId}`;
+    this.calls.push(coordinate);
+    const bytes = this.artifacts.get(coordinate);
+    if (!(bytes instanceof Uint8Array)) {
+      throw new CompilerFailure("remote_mod_download_failed");
+    }
     return bytes.slice();
   }
 }
@@ -586,6 +660,35 @@ function validateApprovedArtifact(artifact, approvedHosts, maxArtifactBytes) {
   }
 }
 
+function validateRemoteMod(mod, maxArtifactBytes) {
+  if (!plainObject(mod) || !sameKeys(mod, [
+    "downloadUrl", "fileId", "filename", "projectId", "provider", "sha256",
+    "sizeBytes",
+  ]) || !["modrinth", "curseforge"].includes(mod.provider) ||
+    typeof mod.projectId !== "string" || !mod.projectId ||
+    typeof mod.fileId !== "string" || !mod.fileId ||
+    !safeModFilename(mod.filename) || !validSha256(mod.sha256) ||
+    !Number.isSafeInteger(mod.sizeBytes) || mod.sizeBytes < 1 ||
+    mod.sizeBytes > maxArtifactBytes || typeof mod.downloadUrl !== "string") {
+    throw new CompilerFailure("invalid_remote_mod");
+  }
+  let url;
+  try {
+    url = new URL(mod.downloadUrl);
+  } catch {
+    throw new CompilerFailure("remote_mod_host_rejected");
+  }
+  const allowedHost = mod.provider === "modrinth"
+    ? "cdn.modrinth.com"
+    : "forgecdn.net";
+  const hostname = url.hostname.toLowerCase();
+  if (url.protocol !== "https:" || url.username || url.password || url.hash ||
+    url.port || (hostname !== allowedHost &&
+      !hostname.endsWith(`.${allowedHost}`))) {
+    throw new CompilerFailure("remote_mod_host_rejected");
+  }
+}
+
 async function readExactResponse(response, expectedSize, maxArtifactBytes) {
   if (response.body?.getReader) {
     const reader = response.body.getReader();
@@ -667,7 +770,35 @@ function copyValidatedBundleContent(files, bundle) {
       forbiddenOutputPath(outputPath) || files.has(outputPath)) {
       throw new CompilerFailure("invalid_local_content");
     }
+
     files.set(outputPath, { bytes: source, mode: 0o644 });
+  }
+}
+
+async function addRemoteMods(files, mods, downloader) {
+  if (mods === undefined) return;
+  if (!Array.isArray(mods) || mods.length > MAX_OUTPUT_FILES ||
+    (mods.length > 0 && typeof downloader?.downloadRemoteMod !== "function")) {
+    throw new CompilerFailure("invalid_remote_mod");
+  }
+  const destinations = new Set([...files.keys()].map((path) =>
+    path.normalize("NFKC").toLowerCase()
+  ));
+  for (const mod of mods) {
+    validateRemoteMod(mod, MAX_ARTIFACT_BYTES);
+    const path = `mods/${mod.filename}`;
+    const collisionKey = path.normalize("NFKC").toLowerCase();
+    if (destinations.has(collisionKey) ||
+      !safeOutputPath(path) || forbiddenOutputPath(path)) {
+      throw new CompilerFailure("remote_mod_collision");
+    }
+    destinations.add(collisionKey);
+    const bytes = await downloader.downloadRemoteMod(mod);
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength !== mod.sizeBytes ||
+      sha256(bytes) !== mod.sha256) {
+      throw new CompilerFailure("remote_mod_hash_mismatch");
+    }
+    files.set(path, { bytes, mode: 0o644 });
   }
 }
 
@@ -987,6 +1118,12 @@ function safeOutputPath(path) {
   return typeof path === "string" && path.length > 0 && path.length <= 255 &&
     !path.includes("\\") && !path.startsWith("/") && !/^[A-Za-z]:/.test(path) &&
     path.split("/").every((part) => part && part !== "." && part !== "..");
+}
+
+function safeModFilename(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 255 &&
+    !value.includes("/") && !value.includes("\\") && !value.includes("\0") &&
+    value.toLowerCase().endsWith(".jar");
 }
 
 function forbiddenOutputPath(path) {

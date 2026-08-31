@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { CompilerFailure } from "./bundle.mjs";
 import {
   CompilerWorker,
@@ -10,6 +11,7 @@ import {
   ReviewedToolchainCatalog,
   StrictArtifactDownloader,
 } from "./reviewed-builder.mjs";
+import { MemoryCompilerJobQueue } from "./job-queue.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -44,9 +46,16 @@ export class CompilerHttpWorker {
         ? options.objectRequestTimeoutMs
         : 30_000;
     this.allowInsecureForTests = options.allowInsecureForTests === true;
+    this.queue = options.jobQueue ??
+      (this.allowInsecureForTests ? new MemoryCompilerJobQueue() : undefined);
     this.activeJobs = 0;
+    this.started = false;
+    this.startPromise = undefined;
+    this.stopping = false;
+    this.loops = [];
+    this.waiters = new Set();
     this.composition = createComposition(options, this.now, this.allowInsecureForTests);
-    this.ready = Boolean(this.composition);
+    this.ready = Boolean(this.composition && validJobQueue(this.queue));
   }
 
   health() {
@@ -70,18 +79,71 @@ export class CompilerHttpWorker {
       transport,
     });
     const envelope = parseEnvelope(body, this.now());
-    if (this.activeJobs >= this.maxConcurrentJobs) {
-      throw new HttpWorkerError(429, "worker_busy");
-    }
-    this.activeJobs += 1;
     try {
+      await this.queue.enqueue({
+        id: envelope.requestId,
+        deploymentId: envelope.job.deploymentId,
+        jobFingerprint: createHash("sha256")
+          .update(JSON.stringify(envelope.job))
+          .digest("hex"),
+        body,
+      });
+    } catch (error) {
+      if (error?.code === "idempotency_conflict") {
+        throw new HttpWorkerError(409, "idempotency_conflict");
+      }
+      throw error;
+    }
+    this.wake();
+    return { status: "accepted", deploymentId: envelope.job.deploymentId };
+  }
+
+  async start() {
+    if (!this.ready) throw new HttpWorkerError(503, "compiler_unavailable");
+    if (this.started) return;
+    if (!this.startPromise) {
+      this.startPromise = (async () => {
+        await this.queue.initialize();
+        this.started = true;
+        this.stopping = false;
+        this.loops = Array.from(
+          { length: this.maxConcurrentJobs },
+          () => this.runLoop(),
+        );
+      })();
+    }
+    await this.startPromise;
+  }
+
+  async stop() {
+    if (!this.started) return;
+    this.stopping = true;
+    this.wake();
+    await Promise.allSettled(this.loops);
+    this.loops = [];
+    this.started = false;
+    this.startPromise = undefined;
+  }
+
+  async runLoop() {
+    while (!this.stopping) {
+      const queued = await this.queue.claim();
+      if (!queued) {
+        await this.waitForWork();
+        continue;
+      }
+      await this.processQueued(queued);
+    }
+  }
+
+  async processQueued(queued) {
+    this.activeJobs += 1;
+    let result;
+    try {
+      const envelope = parseQueuedEnvelope(queued.body);
       const controlPlane = new CallbackBoundControlPlane({
         callbacks: this.composition.callbacks,
-        grants: async (deploymentId) => ({
-          grants: envelope.grants,
-          job: envelope.job,
-          deploymentId,
-        }),
+        job: envelope.job,
         now: this.now,
       });
       const worker = new CompilerWorker({
@@ -90,10 +152,48 @@ export class CompilerHttpWorker {
         controlPlane,
         requestTimeoutMs: this.objectRequestTimeoutMs,
       });
-      return await worker.run(envelope.job);
+      result = await worker.run(envelope.job);
+      const terminal = controlPlane.terminalCallbackDelivered === true &&
+        ["published", "failed"].includes(result?.status);
+      await this.queue.finish(queued.id, {
+        kind: terminal ? "terminal" : "retry",
+        result,
+      });
+    } catch (error) {
+      console.error("xmcl compiler queued job retry", {
+        deploymentId: queued.deploymentId,
+        code: typeof error?.code === "string" ? error.code : "compiler_failed",
+      });
+      await this.queue.finish(queued.id, {
+        kind: "retry",
+        result: {
+          status: "queue_retry",
+          code: typeof error?.code === "string" ? error.code : "compiler_failed",
+        },
+      }).catch(() => undefined);
     } finally {
       this.activeJobs -= 1;
     }
+  }
+
+  waitForWork() {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.waiters.delete(done);
+        resolve();
+      }, 250);
+      timer.unref?.();
+      const done = () => {
+        clearTimeout(timer);
+        this.waiters.delete(done);
+        resolve();
+      };
+      this.waiters.add(done);
+    });
+  }
+
+  wake() {
+    for (const resolve of this.waiters) resolve();
   }
 
   async handleHttp(request, response) {
@@ -117,6 +217,7 @@ export class CompilerHttpWorker {
     }
     let body;
     try {
+      await this.start();
       body = await readRequestBody(request, MAX_REQUEST_BYTES);
       const result = await this.consume({
         method: "POST",
@@ -125,7 +226,7 @@ export class CompilerHttpWorker {
         body,
         transport: { socket: request.socket },
       });
-      return sendJson(response, 200, result);
+      return sendJson(response, 202, result);
     } catch (error) {
       const normalized = normalizeHttpError(error);
       if (normalized.status === 429) response.setHeader("retry-after", "1");
@@ -183,27 +284,30 @@ function createComposition(options, now, allowInsecureForTests) {
 }
 
 class CallbackBoundControlPlane {
-  constructor({ callbacks, grants, now }) {
-    if (typeof grants !== "function") throw new TypeError("missing exact grant provider");
+  constructor({ callbacks, job, now }) {
     if (!callbacks || typeof callbacks.post !== "function") {
       throw new TypeError("missing authenticated callbacks");
     }
+    if (!plainObject(job)) throw new TypeError("missing exact compiler job");
     this.callbacks = callbacks;
-    this.grants = grants;
+    this.job = job;
     this.now = now;
+    this.terminalCallbackDelivered = false;
+    this.grantRefreshSucceeded = false;
   }
 
   async getGrants(deploymentId) {
-    const { grants, job, deploymentId: requestedDeploymentId } = await this.grants(deploymentId);
-    if (deploymentId !== requestedDeploymentId || deploymentId !== job.deploymentId) {
+    if (deploymentId !== this.job.deploymentId) {
       throw new CompilerFailure("invalid_grants");
     }
-    verifyGrantSet(grants, job, { now: this.now(), requireUnexpired: true });
+    const grants = await this.callbacks.grants(this.job);
+    verifyGrantSet(grants, this.job, { now: this.now(), requireUnexpired: true });
+    this.grantRefreshSucceeded = true;
     return grants;
   }
 
   async publish(publication) {
-    const { job } = await this.grants(publication?.deploymentId);
+    const job = this.job;
     if (!publication || publication.deploymentId !== job.deploymentId ||
       publication.manifestSha256 !== job.manifestSha256 ||
       publication.content?.key !== job.expectedContentKey) {
@@ -218,10 +322,11 @@ class CallbackBoundControlPlane {
       content: publication.content,
       descriptor: publication.descriptor,
     });
+    this.terminalCallbackDelivered = true;
   }
 
   async prepareUpload(publication) {
-    const { job } = await this.grants(publication?.deploymentId);
+    const job = this.job;
     if (!publication || publication.deploymentId !== job.deploymentId ||
       publication.manifestSha256 !== job.manifestSha256 ||
       publication.content?.key !== job.expectedContentKey) {
@@ -240,7 +345,10 @@ class CallbackBoundControlPlane {
   }
 
   async failed(failure) {
-    const { job } = await this.grants(failure?.deploymentId);
+    const job = this.job;
+    if (!this.grantRefreshSucceeded) {
+      throw new CompilerFailure("invalid_grants");
+    }
     if (!failure || failure.deploymentId !== job.deploymentId ||
       failure.manifestSha256 !== job.manifestSha256 ||
       !["unsupported_compatibility", "compiler_unavailable", "compiler_failed"].includes(failure.code)) {
@@ -254,6 +362,7 @@ class CallbackBoundControlPlane {
       manifestSha256: job.manifestSha256,
       code: failure.code,
     });
+    this.terminalCallbackDelivered = true;
   }
 }
 
@@ -288,8 +397,27 @@ class AuthenticatedDeploymentCallbacks {
     this.timeoutMs = timeoutMs;
   }
 
+  async grants(job) {
+    if (!plainObject(job) || !validCallbackDeploymentId(job.deploymentId) ||
+      !validId(job.compilerRequestId)) {
+      throw new CompilerFailure("invalid_grants");
+    }
+    const response = await this.post("grants", job.deploymentId, {
+      schemaVersion: 1,
+      compilerRequestId: job.compilerRequestId,
+      deploymentId: job.deploymentId,
+    });
+    if (response.status !== 200 ||
+      !response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+      void response.body?.cancel("invalid grants response").catch(() => undefined);
+      throw new CompilerFailure("invalid_grants");
+    }
+    return await parseGrantResponse(response, job);
+  }
+
   async post(kind, deploymentId, payload) {
     const suffixes = {
+      grants: "grants",
       "upload-prepared": "upload-prepared",
       published: "published",
       failed: "failed",
@@ -297,6 +425,7 @@ class AuthenticatedDeploymentCallbacks {
     if (!Object.hasOwn(suffixes, kind) || !validCallbackDeploymentId(deploymentId)) {
       throw new CompilerFailure("callback_delivery_failed");
     }
+
     const target = `/v1/internal/shared-runtime-compiler/deployments/` +
       `${encodeURIComponent(deploymentId)}/${suffixes[kind]}`;
     const url = `${this.origin}${target}`;
@@ -348,6 +477,26 @@ class AuthenticatedDeploymentCallbacks {
   }
 }
 
+async function parseGrantResponse(response, job) {
+  const bytes = await readBoundedResponse(
+    response,
+    MAX_REQUEST_BYTES,
+    "invalid_grants",
+  );
+  let grants;
+  try {
+    grants = JSON.parse(decoder.decode(bytes));
+  } catch {
+    throw new CompilerFailure("invalid_grants");
+  }
+  try {
+    verifyGrantSet(grants, job, { requireUnexpired: false });
+  } catch {
+    throw new CompilerFailure("invalid_grants");
+  }
+  return grants;
+}
+
 function validCallbackDeploymentId(value) {
   return typeof value === "string" &&
     /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(value);
@@ -394,14 +543,22 @@ export async function parseUploadPreparation(response, job) {
 }
 
 export async function readBoundedCallbackBody(response) {
+  return await readBoundedResponse(
+    response,
+    MAX_CALLBACK_BYTES,
+    "invalid_upload_preparation",
+  );
+}
+
+async function readBoundedResponse(response, maximum, failureCode) {
   const length = response.headers.get("content-length");
   if (length !== null && (!/^(?:0|[1-9]\d*)$/.test(length) ||
-    Number(length) > MAX_CALLBACK_BYTES)) {
+    Number(length) > maximum)) {
     void response.body?.cancel("callback response too large").catch(() => undefined);
-    throw new CompilerFailure("invalid_upload_preparation");
+    throw new CompilerFailure(failureCode);
   }
   const reader = response.body?.getReader?.();
-  if (!reader) throw new CompilerFailure("invalid_upload_preparation");
+  if (!reader) throw new CompilerFailure(failureCode);
   const chunks = [];
   let total = 0;
   try {
@@ -410,23 +567,23 @@ export async function readBoundedCallbackBody(response) {
       if (done) break;
       if (!(value instanceof Uint8Array)) {
         void reader.cancel("invalid callback response").catch(() => undefined);
-        throw new CompilerFailure("invalid_upload_preparation");
+        throw new CompilerFailure(failureCode);
       }
       total += value.byteLength;
-      if (total > MAX_CALLBACK_BYTES) {
+      if (total > maximum) {
         void reader.cancel("callback response too large").catch(() => undefined);
-        throw new CompilerFailure("invalid_upload_preparation");
+        throw new CompilerFailure(failureCode);
       }
       chunks.push(value);
     }
   } catch {
     void reader.cancel("invalid callback response").catch(() => undefined);
-    throw new CompilerFailure("invalid_upload_preparation");
+    throw new CompilerFailure(failureCode);
   } finally {
     reader.releaseLock();
   }
   if (length !== null && total !== Number(length)) {
-    throw new CompilerFailure("invalid_upload_preparation");
+    throw new CompilerFailure(failureCode);
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
@@ -465,6 +622,24 @@ function parseEnvelope(body, now) {
     throw new HttpWorkerError(400, "invalid_request");
   }
   return envelope;
+}
+
+function parseQueuedEnvelope(body) {
+  let value;
+  try {
+    value = JSON.parse(decoder.decode(body));
+  } catch {
+    throw new CompilerFailure("invalid_persisted_job");
+  }
+  const issuedAt = Date.parse(value?.issuedAt);
+  if (!Number.isSafeInteger(issuedAt)) {
+    throw new CompilerFailure("invalid_persisted_job");
+  }
+  try {
+    return parseEnvelope(body, issuedAt);
+  } catch {
+    throw new CompilerFailure("invalid_persisted_job");
+  }
 }
 
 async function verifyIncoming(authenticator, request) {
@@ -507,6 +682,12 @@ function validAuthenticator(value, allowInsecureForTests) {
 
 function validConcurrency(value) {
   return Number.isSafeInteger(value) && value >= 1 && value <= 16;
+}
+
+function validJobQueue(value) {
+  return value && typeof value.initialize === "function" &&
+    typeof value.enqueue === "function" && typeof value.claim === "function" &&
+    typeof value.finish === "function";
 }
 
 function parseTarget(value) {

@@ -120,7 +120,10 @@ function builderFor(fixture, { files, fail = false, downloader } = {}) {
 function buildInput(fixture, localFiles) {
   return {
     bundle: bundleFor(fixture.toolchain, localFiles),
-    frozenManifest: { compatibility: { runtimeCatalog: { sha256: revision } } },
+    frozenManifest: {
+      compatibility: { runtimeCatalog: { sha256: revision } },
+      mods: [],
+    },
     expectedContentKey: "shared-hosting/account/service/compiler-content/content.tar.zst",
   };
 }
@@ -208,6 +211,76 @@ test("builder remains fail-closed without all verified production adapters", asy
   const fixture = toolchainFixture();
   const builder = new ReviewedRuntimeBuilder({ toolchainCatalog: catalogFor([fixture]) });
   await assert.rejects(() => builder.build(buildInput(fixture)), /compiler_unavailable/);
+});
+
+test("downloads exact frozen remote mods and rejects local filename collisions", async () => {
+  const fixture = toolchainFixture();
+  const remoteBytes = bytes("provider-controlled-remote-mod");
+  const remote = {
+    provider: "modrinth",
+    projectId: "R2OftAxM",
+    fileId: "AbCd1234",
+    filename: "farmers-delight.jar",
+    sha256: sha(remoteBytes),
+    sizeBytes: remoteBytes.byteLength,
+    downloadUrl:
+      "https://cdn.modrinth.com/data/R2OftAxM/versions/AbCd1234/farmers-delight.jar",
+  };
+  const downloader = new DeterministicFakeArtifactDownloader(new Map([
+    [fixture.toolchain.artifacts[0].coordinate, fixture.artifactBytes],
+    [`remote:${remote.provider}:${remote.projectId}:${remote.fileId}`, remoteBytes],
+  ]));
+  const builder = builderFor(fixture, { downloader });
+  const input = buildInput(fixture, [{
+    path: "instance/config/server.cfg",
+    bytes: bytes("dedicated=true"),
+  }]);
+  input.frozenManifest.mods = [remote];
+  const built = await builder.build(input);
+  assert.ok(built.content.entries.some((entry) =>
+    entry.path === "mods/farmers-delight.jar" &&
+    entry.sha256 === remote.sha256 &&
+    entry.sizeBytes === remote.sizeBytes));
+
+  const collision = buildInput(fixture, [{
+    path: "instance/mods/farmers-delight.jar",
+    bytes: bytes("local-copy"),
+  }]);
+  collision.frozenManifest.mods = [remote];
+  await assert.rejects(() => builder.build(collision), /remote_mod_collision/);
+});
+
+test("remote mod downloader enforces provider hosts, identity encoding, size, and hash", async () => {
+  const remoteBytes = bytes("exact-remote");
+  const mod = {
+    provider: "curseforge",
+    projectId: "123",
+    fileId: "456",
+    filename: "example.jar",
+    sha256: sha(remoteBytes),
+    sizeBytes: remoteBytes.byteLength,
+    downloadUrl: "https://media.forgecdn.net/files/123/456/example.jar",
+  };
+  const downloader = new StrictArtifactDownloader({
+    fetchImpl: async (url, options) => {
+      assert.equal(url, mod.downloadUrl);
+      assert.equal(options.redirect, "error");
+      assert.equal(options.headers["accept-encoding"], "identity");
+      return new Response(remoteBytes, {
+        status: 200,
+        headers: { "content-length": String(remoteBytes.byteLength) },
+      });
+    },
+  });
+  assert.deepEqual(await downloader.downloadRemoteMod(mod), remoteBytes);
+  await assert.rejects(() => downloader.downloadRemoteMod({
+    ...mod,
+    downloadUrl: "https://attacker.example/example.jar",
+  }), /remote_mod_host_rejected/);
+  await assert.rejects(() => downloader.downloadRemoteMod({
+    ...mod,
+    sha256: "0".repeat(64),
+  }), /remote_mod_hash_mismatch/);
 });
 
 test("strict artifact downloader rejects wrong hosts, redirects, oversize payloads, and bad hashes", async () => {
