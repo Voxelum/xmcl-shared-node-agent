@@ -155,6 +155,12 @@ export class CompilerHttpWorker {
       result = await worker.run(envelope.job);
       const terminal = controlPlane.terminalCallbackDelivered === true &&
         ["published", "failed"].includes(result?.status);
+      if (!terminal) {
+        console.warn("xmcl compiler queued job remains retryable", {
+          deploymentId: queued.deploymentId,
+          status: result?.status,
+        });
+      }
       await this.queue.finish(queued.id, {
         kind: terminal ? "terminal" : "retry",
         result,
