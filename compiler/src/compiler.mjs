@@ -66,9 +66,21 @@ export class CompilerWorker {
           });
         }
       } else {
-        await reconcileExactUpload(this.fetch, prepared.reconciliation, boundPublication, {
-          timeoutMs: this.requestTimeoutMs,
-        });
+        try {
+          await reconcileExactUpload(this.fetch, prepared.reconciliation, boundPublication, {
+            timeoutMs: this.requestTimeoutMs,
+          });
+        } catch {
+          try {
+            await uploadExact(this.fetch, output, built.archive, {
+              timeoutMs: this.requestTimeoutMs,
+            });
+          } catch {
+            await reconcileExactUpload(this.fetch, prepared.reconciliation, boundPublication, {
+              timeoutMs: this.requestTimeoutMs,
+            });
+          }
+        }
       }
       publication = boundPublication;
       publicationStarted = true;

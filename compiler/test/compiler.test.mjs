@@ -500,6 +500,55 @@ test("an immutable 412 reconciles a prior exact binding on redelivery", async ()
   assert.equal(publications.length, 1);
 });
 
+test("an existing binding retries its missing immutable upload", async () => {
+  const { archive, job, grants } = fixture();
+  const artifact = Uint8Array.from([4, 5, 6]);
+  let stored;
+  let reconciliations = 0;
+  const publications = [];
+  const worker = new CompilerWorker({
+    controlPlane: {
+      getGrants: async () => grants,
+      prepareUpload: async (publication) => ({
+        ...prepared(publication),
+        status: "upload_existing",
+      }),
+      publish: async (publication) => publications.push(publication),
+      failed: async () => assert.fail("a retryable upload must not fail"),
+    },
+    builder: reviewedBuilder({
+      artifact,
+      coordinate: "net.fabricmc:fabric-loader:0.16.10",
+      fail: false,
+    }),
+    fetchImpl: async (url, options) => {
+      if (url === grants.grants[0].url) {
+        return new Response(archive, {
+          headers: { "content-length": String(archive.length) },
+        });
+      }
+      if (url === grants.grants[1].url && options.method === "PUT") {
+        stored = options.body;
+        return new Response(null, { status: 201 });
+      }
+      if (url === "https://object.example/reconcile" && options.method === "GET") {
+        reconciliations += 1;
+        if (!stored) return new Response(null, { status: 404 });
+        return new Response(stored, {
+          headers: { "content-length": String(stored.byteLength) },
+        });
+      }
+      assert.fail(`unexpected request ${options.method} ${url}`);
+    },
+  });
+  assert.deepEqual(
+    await worker.run(job),
+    { status: "published", deploymentId: job.deploymentId },
+  );
+  assert.equal(reconciliations, 1);
+  assert.equal(publications.length, 1);
+});
+
 function prepared(publication) {
   return {
     status: "upload_prepared",
