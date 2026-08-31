@@ -305,6 +305,22 @@ test("strict artifact downloader rejects wrong hosts, redirects, oversize payloa
   );
   assert.equal(calls, 0);
 
+  const cachedDownloader = new StrictArtifactDownloader({
+    fetchImpl: async () => {
+      throw new Error("cache hit must not use the network");
+    },
+    artifactCacheReader: async (candidate) => {
+      assert.equal(candidate.sha256, artifact.sha256);
+      return fixture.artifactBytes;
+    },
+  });
+  assert.deepEqual(
+    await cachedDownloader.download(artifact, {
+      approvedHosts: ["toolchain.example"],
+    }),
+    fixture.artifactBytes,
+  );
+
   const mirrored = {
     ...artifact,
     url: "https://libraries.minecraft.net/com/example/reviewed/1.0/reviewed-1.0.jar",

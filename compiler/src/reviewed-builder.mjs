@@ -76,20 +76,42 @@ export class ReviewedToolchainCatalog {
  * artifact object rather than an arbitrary URL.
  */
 export class StrictArtifactDownloader {
-  constructor({ fetchImpl, timeoutMs = 30_000, maxArtifactBytes = MAX_ARTIFACT_BYTES } = {}) {
+  constructor({
+    fetchImpl,
+    artifactCacheReader,
+    timeoutMs = 30_000,
+    maxArtifactBytes = MAX_ARTIFACT_BYTES,
+  } = {}) {
     if (typeof fetchImpl !== "function" ||
+      artifactCacheReader !== undefined && typeof artifactCacheReader !== "function" ||
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000 ||
       !Number.isSafeInteger(maxArtifactBytes) || maxArtifactBytes < 1 ||
       maxArtifactBytes > MAX_ARTIFACT_BYTES) {
       throw new TypeError("invalid strict artifact downloader configuration");
     }
     this.fetchImpl = fetchImpl;
+    this.artifactCacheReader = artifactCacheReader;
     this.timeoutMs = timeoutMs;
     this.maxArtifactBytes = maxArtifactBytes;
   }
 
   async download(artifact, { approvedHosts } = {}) {
     validateApprovedArtifact(artifact, approvedHosts, this.maxArtifactBytes);
+    if (this.artifactCacheReader) {
+      let cached;
+      try {
+        cached = await this.artifactCacheReader({ ...artifact });
+      } catch {
+        throw new CompilerFailure("artifact_cache_failed");
+      }
+      if (cached !== undefined) {
+        if (!(cached instanceof Uint8Array) || cached.byteLength !== artifact.sizeBytes ||
+          sha256(cached) !== artifact.sha256) {
+          throw new CompilerFailure("artifact_cache_mismatch");
+        }
+        return cached.slice();
+      }
+    }
     const downloadUrl = reviewedArtifactDownloadUrl(artifact.url);
     const controller = new AbortController();
     let timeout;

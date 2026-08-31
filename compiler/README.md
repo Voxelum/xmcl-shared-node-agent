@@ -161,6 +161,10 @@ avoids regional Azure Front Door failures while preserving the catalog's exact
 coordinate, byte size, and SHA-256 requirements; no job-supplied mirror or path
 is accepted.
 
+Root-owned artifacts in `/var/lib/xmcl-compiler/artifacts/<sha256>` are checked
+before network download. Cached bytes must still match the reviewed catalog's
+exact size and SHA-256, and the compiler service has read-only access to them.
+
 The weekly workflow only validates and refreshes this lock, then opens a review
 PR if it changed. It does not compose a compiler worker, run installers, build
 or publish an image, upload content, or provision infrastructure.

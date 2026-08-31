@@ -24,6 +24,7 @@ export const PRODUCTION_PATHS = Object.freeze({
   workspaceRoot: "/run/xmcl-compiler/workspaces",
   replayRoot: "/var/lib/xmcl-compiler/replay",
   queueRoot: "/var/lib/xmcl-compiler/jobs",
+  artifactRoot: "/var/lib/xmcl-compiler/artifacts",
   secretsRoot: "/run/credentials/xmcl-compiler.service",
   bubblewrap: "/usr/bin/bwrap",
   prlimit: "/usr/bin/prlimit",
@@ -81,6 +82,14 @@ export async function createProductionCompilerWorker({
     sandboxAdapter: sandbox,
     artifactDownloader: new StrictArtifactDownloader({
       fetchImpl,
+      artifactCacheReader: async (artifact) => {
+        try {
+          return await readFile(resolve(paths.artifactRoot, artifact.sha256));
+        } catch (error) {
+          if (error?.code === "ENOENT") return undefined;
+          throw error;
+        }
+      },
       timeoutMs: config.artifactDownloadTimeoutMs,
     }),
     objectRequestTimeoutMs: config.objectRequestTimeoutMs,
@@ -165,6 +174,7 @@ function validatePathSet(paths) {
     Object.values(paths).some((path) => !absoluteNormalizedPath(path)) ||
     !within(paths.jreRoot, `${paths.jreRoot}${sep}probe`) ||
     !within(paths.queueRoot, `${paths.queueRoot}${sep}probe`) ||
+    !within(paths.artifactRoot, `${paths.artifactRoot}${sep}probe`) ||
     !within(paths.secretsRoot, `${paths.secretsRoot}${sep}probe`)) {
     throw new TypeError("invalid production paths");
   }
