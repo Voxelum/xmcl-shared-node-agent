@@ -90,11 +90,12 @@ export class StrictArtifactDownloader {
 
   async download(artifact, { approvedHosts } = {}) {
     validateApprovedArtifact(artifact, approvedHosts, this.maxArtifactBytes);
+    const downloadUrl = reviewedArtifactDownloadUrl(artifact.url);
     const controller = new AbortController();
     let timeout;
     try {
       const download = async () => {
-        const response = await this.fetchImpl(artifact.url, {
+        const response = await this.fetchImpl(downloadUrl, {
           method: "GET",
           headers: { "accept-encoding": "identity" },
           redirect: "error",
@@ -105,7 +106,7 @@ export class StrictArtifactDownloader {
         if (!response || response.status !== 200 || response.redirected) {
           throw new CompilerFailure("artifact_download_failed");
         }
-        if (response.url && new URL(response.url).href !== new URL(artifact.url).href) {
+        if (response.url && new URL(response.url).href !== downloadUrl) {
           throw new CompilerFailure("artifact_redirect_rejected");
         }
         const contentEncoding = response.headers?.get("content-encoding");
@@ -640,6 +641,14 @@ async function resolveVerifiedJre(registry, expected) {
   };
 }
 
+function reviewedArtifactDownloadUrl(value) {
+  const url = new URL(value);
+  if (url.hostname === "libraries.minecraft.net") {
+    return `https://repo1.maven.org/maven2${url.pathname}`;
+  }
+  return url.href;
+}
+
 function validateApprovedArtifact(artifact, approvedHosts, maxArtifactBytes) {
   if (!Array.isArray(approvedHosts) || !Number.isSafeInteger(maxArtifactBytes) ||
     maxArtifactBytes < 1 || !plainObject(artifact) || !validCoordinate(artifact.coordinate) ||
@@ -654,7 +663,8 @@ function validateApprovedArtifact(artifact, approvedHosts, maxArtifactBytes) {
   } catch {
     throw new CompilerFailure("artifact_not_approved");
   }
-  if (url.protocol !== "https:" || url.username || url.password || url.hash || url.port ||
+  if (url.protocol !== "https:" || url.username || url.password || url.hash ||
+    url.search || url.port ||
     !approvedHosts.includes(url.hostname.toLowerCase())) {
     throw new CompilerFailure("artifact_host_rejected");
   }

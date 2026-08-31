@@ -305,6 +305,29 @@ test("strict artifact downloader rejects wrong hosts, redirects, oversize payloa
   );
   assert.equal(calls, 0);
 
+  const mirrored = {
+    ...artifact,
+    url: "https://libraries.minecraft.net/com/example/reviewed/1.0/reviewed-1.0.jar",
+  };
+  const mirrorDownloader = new StrictArtifactDownloader({
+    fetchImpl: async (url) => {
+      assert.equal(
+        url,
+        "https://repo1.maven.org/maven2/com/example/reviewed/1.0/reviewed-1.0.jar",
+      );
+      return new Response(fixture.artifactBytes, {
+        status: 200,
+        headers: { "content-length": String(fixture.artifactBytes.byteLength) },
+      });
+    },
+  });
+  assert.deepEqual(
+    await mirrorDownloader.download(mirrored, {
+      approvedHosts: ["libraries.minecraft.net"],
+    }),
+    fixture.artifactBytes,
+  );
+
   const redirected = new StrictArtifactDownloader({
     fetchImpl: async () => ({
       status: 200,
