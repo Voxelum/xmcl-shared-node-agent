@@ -479,6 +479,7 @@ func validate(input Request) error {
 func renderEnvironment(input Request) string {
 	values := [][2]string{
 		{"XMCL_NODE_ID", input.NodeID},
+		{"XMCL_INSTANCE_ID", input.InstanceID},
 		{"XMCL_REGION", input.Config.LogicalRegion},
 		{"XMCL_CONTROL_PLANE_URL", input.Config.ControlPlaneURL},
 		{"XMCL_ENROLLMENT_TOKEN", input.EnrollmentToken},

@@ -115,6 +115,9 @@ func TestRunnerPersistsProbeApprovalAndIdempotentApply(t *testing.T) {
 	if !bytes.Contains([]byte(executor.env), []byte("XMCL_ENROLLMENT_TOKEN='aaaaaaaa")) {
 		t.Fatal("bootstrap environment did not contain the enrollment token")
 	}
+	if !bytes.Contains([]byte(executor.env), []byte("XMCL_INSTANCE_ID='ecs-mow-1'")) {
+		t.Fatal("bootstrap environment did not contain the provider instance ID")
+	}
 	if !bytes.Contains([]byte(executor.env), []byte("OTEL_EXPORTER_OTLP_ENDPOINT='https://otel.example.com'")) ||
 		!bytes.Contains([]byte(executor.env), []byte("OTEL_EXPORTER_OTLP_HEADERS='authorization=node-scoped-value'")) {
 		t.Fatal("bootstrap environment did not contain OTLP settings")
