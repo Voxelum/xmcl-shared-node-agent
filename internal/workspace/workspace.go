@@ -312,6 +312,7 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 			return "", err
 		}
 		manifest.Content = command.RuntimeContent
+		manifest.Config = nil
 		manifest.LogicalSize = logicalSize(manifestDescriptors(manifest))
 		manifest.AggregateSHA256 = aggregateDescriptors(manifestDescriptors(manifest))
 		manifest.ManifestHash = manifest.AggregateSHA256
@@ -1232,7 +1233,7 @@ func validateRuntimeContent(content controlplane.WorkspaceBlob, command controlp
 		content.Key,
 		prefix+"/compiler-content/",
 	) || !strings.HasSuffix(content.Key, ".tar.zst") ||
-		!allPaths(content.Paths, isContentPath) ||
+		!allPaths(content.Paths, isRuntimeContentPath) ||
 		!containsPath(content.Paths, ".xmcl/runtime.json") ||
 		!containsPath(content.Paths, ".xmcl/launch.sh") {
 		return errors.New("command runtime content is not a valid compiler-owned content layer")
@@ -1405,7 +1406,7 @@ func validateManifest(manifest controlplane.WorkspaceManifest, command controlpl
 	} else if command.RuntimeContent == nil ||
 		!isCompilerContent(*manifest.Content) ||
 		!sameArchive(*manifest.Content, *command.RuntimeContent) ||
-		!allPaths(manifest.Content.Paths, isContentPath) {
+		!allPaths(manifest.Content.Paths, isRuntimeContentPath) {
 		return errors.New("workspace manifest content layer is invalid")
 	}
 	if manifest.Config != nil {
@@ -1616,6 +1617,10 @@ func isWorldPath(path string) bool {
 func isConfigPath(path string) bool {
 	return path == "config" || strings.HasPrefix(path, "config/") ||
 		path == "defaultconfigs" || strings.HasPrefix(path, "defaultconfigs/")
+}
+
+func isRuntimeContentPath(path string) bool {
+	return !isWorldPath(path)
 }
 
 func isContentPath(path string) bool {

@@ -18,6 +18,35 @@ import (
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
 )
 
+func TestCompilerRuntimeContentAcceptsReviewedConfigPaths(t *testing.T) {
+	command := controlplane.Command{
+		AccountID: "account_1",
+		ServiceID: "service_1",
+		Workspace: controlplane.Workspace{
+			ObjectPrefix: "shared-hosting/account_1/service_1/",
+		},
+	}
+	content := controlplane.WorkspaceBlob{
+		Key:            "shared-hosting/account_1/service_1/compiler-content/" + strings.Repeat("a", 64) + ".tar.zst",
+		SHA256:         strings.Repeat("b", 64),
+		CompressedSize: 4,
+		LogicalSize:    4,
+		Paths: []string{
+			".xmcl/runtime.json",
+			".xmcl/launch.sh",
+			"config/fml.toml",
+			"defaultconfigs/neoforge-server.toml",
+		},
+	}
+	if err := validateRuntimeContent(content, command); err != nil {
+		t.Fatal(err)
+	}
+	content.Paths = append(content.Paths, "world/level.dat")
+	if err := validateRuntimeContent(content, command); err == nil {
+		t.Fatal("compiler runtime content accepted a world path")
+	}
+}
+
 type testQuota struct{}
 
 func (testQuota) Validate(context.Context) error             { return nil }
