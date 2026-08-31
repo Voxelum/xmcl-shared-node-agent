@@ -644,6 +644,9 @@ async function resolveVerifiedJre(registry, expected) {
 function reviewedArtifactDownloadUrl(value) {
   const url = new URL(value);
   if (url.hostname === "libraries.minecraft.net") {
+    if (url.pathname.startsWith("/com/mojang/")) {
+      return `https://repo.spongepowered.org/repository/maven-public${url.pathname}`;
+    }
     return `https://repo1.maven.org/maven2${url.pathname}`;
   }
   return url.href;

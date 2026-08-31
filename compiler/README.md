@@ -155,10 +155,11 @@ unselected Java component/major, unsupported URL/host/path, duplicate tuple,
 incorrect template, or missing primary/Mojang server artifact.
 
 At build time, artifacts reviewed under `libraries.minecraft.net` use the
-same absolute Maven path on the code-owned `repo1.maven.org/maven2` mirror.
-This avoids regional Azure Front Door failures while preserving the catalog's
-exact coordinate, byte size, and SHA-256 requirements; no job-supplied mirror
-or path is accepted.
+same absolute Maven path on a code-owned mirror: `com/mojang` artifacts use
+Sponge's public Maven proxy, while other artifacts use Maven Central. This
+avoids regional Azure Front Door failures while preserving the catalog's exact
+coordinate, byte size, and SHA-256 requirements; no job-supplied mirror or path
+is accepted.
 
 The weekly workflow only validates and refreshes this lock, then opens a review
 PR if it changed. It does not compose a compiler worker, run installers, build

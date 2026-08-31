@@ -328,6 +328,29 @@ test("strict artifact downloader rejects wrong hosts, redirects, oversize payloa
     fixture.artifactBytes,
   );
 
+  const mojangMirrored = {
+    ...artifact,
+    url: "https://libraries.minecraft.net/com/mojang/logging/1.2.7/logging-1.2.7.jar",
+  };
+  const mojangMirrorDownloader = new StrictArtifactDownloader({
+    fetchImpl: async (url) => {
+      assert.equal(
+        url,
+        "https://repo.spongepowered.org/repository/maven-public/com/mojang/logging/1.2.7/logging-1.2.7.jar",
+      );
+      return new Response(fixture.artifactBytes, {
+        status: 200,
+        headers: { "content-length": String(fixture.artifactBytes.byteLength) },
+      });
+    },
+  });
+  assert.deepEqual(
+    await mojangMirrorDownloader.download(mojangMirrored, {
+      approvedHosts: ["libraries.minecraft.net"],
+    }),
+    fixture.artifactBytes,
+  );
+
   const redirected = new StrictArtifactDownloader({
     fetchImpl: async () => ({
       status: 200,
