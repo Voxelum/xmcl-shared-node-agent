@@ -1165,6 +1165,7 @@ function forbiddenOutputPath(path) {
   const lower = path.toLowerCase();
   return /(?:^|\/)(?:eula\.txt|java(?:w)?(?:\.exe)?)$/.test(lower) ||
     /(?:^|\/)(?:jre|jdk)(?:\/|$)/.test(lower) ||
+    /^neoforge_installer\d+(?:\/|$)/.test(lower) ||
     /\.(?:sh|bat|cmd|ps1|exe)$/i.test(path);
 }
 

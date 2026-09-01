@@ -187,6 +187,7 @@ test("bubblewrap adapter assembles exact NeoForge inputs with enforced isolation
   assert.ok(command.args.includes("--unshare-all"));
   assert.ok(command.args.includes("--clearenv"));
   assert.ok(command.args.includes("--tmpfs"));
+  assert.ok(command.args.includes("-Djava.io.tmpdir=/tmp"));
   assert.ok(command.args.includes("--nproc=256"));
   assert.ok(command.args.includes("-XX:ActiveProcessorCount=2"));
   assert.ok(command.args.includes("-XX:CompressedClassSpaceSize=256m"));
