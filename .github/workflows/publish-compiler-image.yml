@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - compiler/**
+      - runtime-image/runtime-catalog.lock.json
       - .github/workflows/publish-compiler-image.yml
   workflow_dispatch:
 
@@ -60,7 +61,8 @@ jobs:
       - name: Build and publish digest-addressed image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: compiler
+          context: .
+          file: compiler/Dockerfile.aca
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}

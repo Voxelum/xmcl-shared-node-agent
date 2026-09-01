@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "callback": {
+    "controlPlaneOrigin": "https://control-plane.example.invalid",
+    "timeoutMs": 10000
+  },
+  "identity": {
+    "keyId": "compiler-aca-production",
+    "secretPath": "/run/xmcl-compiler/config/service-hmac-secret",
+    "maxAgeMs": 60000,
+    "maxReplayEntries": 1000000
+  },
+  "sandbox": {
+    "timeoutMs": 300000,
+    "addressSpaceBytes": 3221225472,
+    "fileSizeBytes": 268435456,
+    "processLimit": 256,
+    "cpuSeconds": 240
+  },
+  "artifactDownloadTimeoutMs": 240000,
+  "objectRequestTimeoutMs": 900000,
+  "maxConcurrentJobs": 1
+}

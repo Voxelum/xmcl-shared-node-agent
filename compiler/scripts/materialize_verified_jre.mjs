@@ -46,7 +46,11 @@ export async function materializeVerifiedJre({
     throw new MaterializerFailure("runtime_catalog_mismatch");
   }
   const toolchains = catalog.toolchains.filter((toolchain) => toolchain.jre.id === jreId);
-  if (toolchains.length !== 1) throw new MaterializerFailure("jre_not_supported");
+  if (toolchains.length < 1 ||
+    toolchains.some((toolchain) =>
+      !sameJreDefinition(toolchain.jre, toolchains[0].jre))) {
+    throw new MaterializerFailure("jre_not_supported");
+  }
   const expected = toolchains[0].jre;
   const resolutions = runtime.resolutions.filter((resolution) =>
     resolution?.component === expected.component && resolution?.major === expected.major);
@@ -300,6 +304,14 @@ function sameKeys(value, expected) {
   const keys = [...expected].sort();
   return actual.length === keys.length &&
     actual.every((key, index) => key === keys[index]);
+}
+
+function sameJreDefinition(left, right) {
+  return left?.id === right?.id &&
+    left.sha256 === right.sha256 &&
+    left.component === right.component &&
+    left.major === right.major &&
+    left.runtimeCatalogRevision === right.runtimeCatalogRevision;
 }
 
 function parseArguments(arguments_) {

@@ -51,6 +51,7 @@ export class CompilerHttpWorker {
     this.activeJobs = 0;
     this.started = false;
     this.startPromise = undefined;
+    this.initializePromise = undefined;
     this.stopping = false;
     this.loops = [];
     this.waiters = new Set();
@@ -103,7 +104,7 @@ export class CompilerHttpWorker {
     if (this.started) return;
     if (!this.startPromise) {
       this.startPromise = (async () => {
-        await this.queue.initialize();
+        await this.initialize();
         this.started = true;
         this.stopping = false;
         this.loops = Array.from(
@@ -113,6 +114,29 @@ export class CompilerHttpWorker {
       })();
     }
     await this.startPromise;
+  }
+
+  async initialize() {
+    if (!this.ready) throw new HttpWorkerError(503, "compiler_unavailable");
+    if (!this.initializePromise) {
+      this.initializePromise = this.queue.initialize();
+    }
+    await this.initializePromise;
+  }
+
+  async runOne(id) {
+    if (this.started) throw new Error("cannot run one job while background consumers are active");
+    await this.initialize();
+    const queued = await this.queue.claim(id);
+    if (!queued) {
+      const result = id && typeof this.queue.terminalResult === "function"
+        ? await this.queue.terminalResult(id)
+        : undefined;
+      return result
+        ? { terminal: true, result }
+        : { terminal: false, result: { status: "queue_empty" } };
+    }
+    return await this.processQueued(queued);
   }
 
   async stop() {
@@ -165,6 +189,7 @@ export class CompilerHttpWorker {
         kind: terminal ? "terminal" : "retry",
         result,
       });
+      return { terminal, result };
     } catch (error) {
       console.error("xmcl compiler queued job retry", {
         deploymentId: queued.deploymentId,
@@ -177,6 +202,13 @@ export class CompilerHttpWorker {
           code: typeof error?.code === "string" ? error.code : "compiler_failed",
         },
       }).catch(() => undefined);
+      return {
+        terminal: false,
+        result: {
+          status: "queue_retry",
+          code: typeof error?.code === "string" ? error.code : "compiler_failed",
+        },
+      };
     } finally {
       this.activeJobs -= 1;
     }

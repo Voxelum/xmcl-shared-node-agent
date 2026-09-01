@@ -84,3 +84,23 @@ test("filesystem queue persists exact jobs, recovers running work, deduplicates,
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("filesystem queue claims only the requested compiler job", async () => {
+  const directory = join(process.cwd(), ".test-artifacts", `compiler-queue-${randomUUID()}`);
+  const queue = new FilesystemCompilerJobQueue({ directory });
+  const input = (id, fingerprint) => ({
+    id,
+    deploymentId: `deployment_${id}`,
+    jobFingerprint: fingerprint.repeat(64),
+    body: encoder.encode(`{"id":"${id}"}`),
+  });
+  try {
+    await queue.initialize();
+    await queue.enqueue(input("one", "a"));
+    await queue.enqueue(input("two", "b"));
+    assert.equal((await queue.claim("two")).id, "two");
+    assert.equal((await queue.counts()).pending, 2);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

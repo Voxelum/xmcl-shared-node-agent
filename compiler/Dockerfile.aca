@@ -1,0 +1,47 @@
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS jre-builder
+
+WORKDIR /build
+COPY compiler/package.json ./compiler/
+COPY compiler/src ./compiler/src
+COPY compiler/scripts/materialize_verified_jre.mjs ./compiler/scripts/
+COPY compiler/toolchain-catalog.lock.json ./compiler/
+COPY runtime-image/runtime-catalog.lock.json ./runtime-image/
+RUN node compiler/scripts/materialize_verified_jre.mjs \
+      --runtime-catalog-lock /build/runtime-image/runtime-catalog.lock.json \
+      --toolchain-catalog-lock /build/compiler/toolchain-catalog.lock.json \
+      --jre-id java-runtime-delta-21 \
+      --output-root /build/jres/java-runtime-delta-21
+
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y bubblewrap ca-certificates util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p \
+      /opt/xmcl-compiler/app \
+      /opt/xmcl-compiler/config \
+      /opt/xmcl/jres \
+      /run/xmcl-compiler \
+      /var/lib/xmcl-compiler \
+    && chown 10001:10001 /run/xmcl-compiler /var/lib/xmcl-compiler \
+    && chmod 0700 /run/xmcl-compiler /var/lib/xmcl-compiler
+
+WORKDIR /opt/xmcl-compiler/app
+COPY --chown=10001:10001 compiler/package.json ./
+COPY --chown=10001:10001 compiler/src ./src
+COPY --chown=10001:10001 compiler/scripts ./scripts
+COPY --chown=10001:10001 compiler/toolchain-catalog.lock.json ./
+COPY compiler/deploy/jre-registry.aca.json /opt/xmcl-compiler/config/jre-registry.json
+COPY --from=jre-builder /build/jres/java-runtime-delta-21 /opt/xmcl/jres/java-runtime-delta-21
+
+RUN chmod -R a-w /opt/xmcl-compiler /opt/xmcl/jres \
+    && chmod 0555 \
+      /opt/xmcl-compiler/app/scripts/aca_entrypoint.mjs \
+      /opt/xmcl-compiler/app/scripts/probe_bubblewrap.mjs \
+      /opt/xmcl/jres/java-runtime-delta-21/bin/java
+
+USER 10001:10001
+ENV HOME=/nonexistent \
+    NODE_ENV=production
+ENTRYPOINT ["/usr/local/bin/node", "/opt/xmcl-compiler/app/scripts/aca_entrypoint.mjs"]
+CMD ["probe"]

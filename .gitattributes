@@ -1,2 +1,4 @@
 *.sh text eol=lf
 *.yml text eol=lf
+compiler/toolchain-catalog.lock.json text eol=lf
+runtime-image/runtime-catalog.lock.json text eol=lf

@@ -97,12 +97,19 @@ export class FilesystemCompilerJobQueue {
     });
   }
 
-  async claim() {
+  async claim(id) {
+    if (id !== undefined && (typeof id !== "string" || !id)) {
+      throw new TypeError("invalid compiler queue claim");
+    }
     return await this.lock(async () => {
       const now = this.now();
-      for (const name of await jsonFiles(this.pendingDirectory)) {
+      const names = id === undefined
+        ? await jsonFiles(this.pendingDirectory)
+        : [`${queueKey(id)}.json`];
+      for (const name of names) {
         const path = join(this.pendingDirectory, name);
-        const record = await readRecord(path);
+        const record = await readRecordIfPresent(path);
+        if (!record || id !== undefined && record.id !== id) continue;
         if (record.state === "running" || record.nextAttemptAt > now) continue;
         const running = {
           ...record,
@@ -166,6 +173,15 @@ export class FilesystemCompilerJobQueue {
     return { pending: pending.length, archived: archive.length };
   }
 
+  async terminalResult(id) {
+    if (typeof id !== "string" || !id) throw new TypeError("invalid compiler queue id");
+    const record = await readRecordIfPresent(
+      join(this.archiveDirectory, `${queueKey(id)}.json`),
+    );
+    if (!record || record.id !== id || record.state !== "terminal") return undefined;
+    return record.terminalResult;
+  }
+
   lock(action) {
     const result = this.tail.then(action, action);
     this.tail = result.then(() => undefined, () => undefined);
@@ -218,8 +234,12 @@ export class MemoryCompilerJobQueue {
     return { duplicate: false };
   }
 
-  async claim() {
+  async claim(id) {
+    if (id !== undefined && (typeof id !== "string" || !id)) {
+      throw new TypeError("invalid compiler queue claim");
+    }
     for (const record of this.pending.values()) {
+      if (id !== undefined && record.id !== id) continue;
       if (record.state === "running" || record.nextAttemptAt > this.now()) continue;
       record.state = "running";
       record.attempts += 1;
@@ -250,6 +270,11 @@ export class MemoryCompilerJobQueue {
 
   async counts() {
     return { pending: this.pending.size, archived: this.archive.size };
+  }
+
+  async terminalResult(id) {
+    if (typeof id !== "string" || !id) throw new TypeError("invalid compiler queue id");
+    return this.archive.get(id)?.terminalResult;
   }
 }
 

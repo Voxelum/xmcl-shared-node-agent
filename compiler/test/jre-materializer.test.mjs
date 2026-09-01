@@ -143,6 +143,21 @@ test("materializes and re-verifies the exact catalog-bound Java 21 root", async 
   assert.equal(verified.readOnly, true);
 });
 
+test("production locks select one identical JRE used by multiple toolchains", async () => {
+  const productionRoot = join(root, "production-selection");
+  const outputRoot = join(productionRoot, "jre");
+  await rm(productionRoot, { recursive: true, force: true });
+  await mkdir(productionRoot, { recursive: true });
+  await assert.rejects(() => materializeVerifiedJre({
+    runtimeCatalogPath: resolve("../runtime-image/runtime-catalog.lock.json"),
+    toolchainCatalogPath: resolve("toolchain-catalog.lock.json"),
+    outputRoot,
+    fetchImpl: async () => {
+      throw new Error("network deliberately disabled");
+    },
+  }), (error) => error?.code === "jre_download_failed");
+});
+
 function sha1(bytes) {
   return createHash("sha1").update(bytes).digest("hex");
 }

@@ -347,12 +347,12 @@ archive verification uses views rather than cloning every file.
 
 ## Runtime packaging
 
-The Dockerfile is a fail-closed, experimental packaging artifact, not the
-supported staging deployment. Default Docker seccomp/AppArmor blocks the
-mandatory Bubblewrap namespace probe. No Docker invocation is documented or
-supported until narrow reviewed Docker seccomp and AppArmor profiles exist.
-Never bypass readiness with privileged mode, `SYS_ADMIN`, a Docker socket, or
-an unconfined profile.
+The original `Dockerfile` remains a fail-closed experimental HTTP-service
+artifact. `Dockerfile.aca` is the finite Container Apps Job image. It
+materializes the exact catalog-bound Java 21 runtime during the image build,
+copies the verified resolution into the final image, removes write bits from
+the application and JRE, and runs as UID/GID 10001. It never installs a generic
+APT JRE.
 
 There are deliberately no environment variables for catalog URLs, installer
 commands, Java paths, Docker options, sandbox commands, callback URLs, or
@@ -376,6 +376,210 @@ the catalog JRE digest, then verifies every declared file, size, SHA-1,
 executable bit, directory, and symlink without permitting a link to escape the
 root. `/readyz` becomes 200 only after those checks, the replay store, key
 permissions, and an actual Bubblewrap namespace probe succeed.
+
+### Azure Container Apps Job
+
+`deploy/aca-job.bicep` defines one manual, scale-to-zero **canary-only** job
+resource. Its internal module hard-codes `probe`, has no environment variables
+or secrets, and cannot process a deployment. The repository intentionally
+contains no independently deployable enabled-job template: a parameter named
+`approved`, a Bicep assertion, or a human-supplied digest is not proof that an
+ACA execution succeeded.
+
+The dormant one-shot entrypoint is packaged for a future protected promoter.
+One execution handles one signed deployment delivery and exits; it does not
+start the HTTP server. The intended execution shape has one replica, one
+required completion, no platform retry, a 1200-second replica timeout, 2 vCPU,
+and 4 GiB memory. A failed or uncertain compiler attempt exits nonzero and
+remains in the durable queue; the control plane must reconcile it and start a
+new execution with a fresh signature. ACA replica retry must remain zero
+because retrying the same execution would replay the same inbound HMAC nonce.
+
+The Bicep template references an existing managed environment and an existing
+Azure Files environment storage definition. It creates no storage account,
+network, role assignment, managed identity, or registry credential. The job
+identity is explicitly `None`. The storage definition must present the share
+as UID/GID 10001 with `0700` directories and `0600` files. The share backs
+`/var/lib/xmcl-compiler`; `/run/xmcl-compiler` is a replica-scoped `EmptyDir`.
+Replay, pending jobs, and terminal archives are persistent. Workspaces,
+delivery material, and the copied HMAC credential disappear with the replica.
+The artifact-cache subdirectory is mounted read-only into the inner worker.
+Each request ID has a separate queue directory and a durable 25-minute
+execution lease. The worker claims only the delivered request ID, so concurrent
+manual executions cannot consume one another's jobs. A duplicate active
+request fails closed; after a crash its lease must expire before a replacement
+execution can recover the request. Recovery cannot reuse the expired delivery
+file: the control plane must create a new outer envelope with fresh
+`issuedAt`/`expiresAt`, fresh exact grants, and a fresh HMAC timestamp/nonce,
+while preserving the inner `compilerRequestId`, deployment identity, job, and
+therefore job fingerprint. After authenticating the fresh envelope, enqueue
+replaces the stale persisted outer body and `runOne` claims only that stable
+request ID. An expired or replayed signature is rejected before recovery.
+
+The image defaults to `probe`, and `deploy/aca-job.bicep` hard-codes the probe
+entrypoint. In this mode it processes no deployment. It requires:
+
+- UID/GID 10001, zero effective outer-container capabilities, and
+  `NoNewPrivs: 1`;
+- an explicit unprivileged user namespace plus mount, PID, IPC, UTS, and
+  network namespaces;
+- a tmpfs Bubblewrap root, read-only `/usr` and JRE mounts, a writable
+  ephemeral workspace, and a runnable exact Java 21 binary;
+- a second nested Bubblewrap invocation, matching the production outer-worker
+  plus inner-installer namespace shape; and
+- atomic replay create/deduplication, file and directory `fsync`, queue claim,
+  and terminal archive operations on the mounted persistent share.
+
+Any failed check exits nonzero. Passing it does not unlock a template in this
+repository. Never make the probe optional and never work around it with
+privileged mode, `SYS_ADMIN`, a Docker socket, `seccomp=unconfined`, or by
+removing Bubblewrap.
+
+The dormant `job` mode in `scripts/aca_entrypoint.mjs` copies the protected
+worker config, HMAC secret, and one signed delivery into the ephemeral volume
+with mode `0400`. It then enters an outer Bubblewrap filesystem/PID/user
+sandbox. That sandbox supplies the worker with a tmpfs root and only these
+writable paths:
+
+```text
+/run/xmcl-compiler/workspaces
+/var/lib/xmcl-compiler/replay
+/var/lib/xmcl-compiler/jobs
+/var/lib/xmcl-compiler/leases
+```
+
+The outer sandbox retains the ACA network namespace so trusted compiler code
+can call the exact control-plane and reviewed artifact origins. The existing
+inner `BubblewrapSandboxAdapter` creates a separate network namespace for the
+untrusted installer. Its environment remains empty and no credential,
+callback configuration, replay state, or Docker socket is mounted inside it.
+The JRE baked into the OCI image is not assumed read-only merely because the
+image is immutable: the outer `--ro-bind` creates the read-only mount that
+`VerifiedReadOnlyJreRegistry` independently observes in
+`/proc/self/mountinfo`.
+
+The per-execution `XMCL_COMPILER_DELIVERY_B64` decodes to this exact wrapper:
+
+```json
+{
+  "schemaVersion": 1,
+  "method": "POST",
+  "target": "/v1/compiler-jobs",
+  "headers": {
+    "authorization": "HMAC <key-id>:<signature>",
+    "x-xmcl-nonce": "<fresh nonce>",
+    "x-xmcl-timestamp": "<unix milliseconds>"
+  },
+  "bodyBase64": "<base64 of the existing schema-versioned compiler envelope>"
+}
+```
+
+The ACA body is capped at 60 KiB (the HTTP service remains capped at 256 KiB)
+and passes through the same HMAC,
+timestamp, nonce, envelope, grant, catalog, download, immutable PUT, output
+revalidation, and callback code as the HTTP boundary. The start caller must
+submit the complete execution template override, preserving the immutable
+image digest, resource settings, volume mounts, `job` argument, and the two
+secret references while replacing only the empty delivery value. Microsoft
+documents that a start override replaces the whole template and that a
+principal able to start a job can access its configured secrets. Therefore the
+launcher is a highly trusted control-plane principal. Grant it only the exact
+job read/start/execution-read actions; do not expose that principal or a
+generic Container Apps Contributor credential to tenant or node code.
+The delivery wrapper is base64-encoded once more for the execution environment
+override; the 60-KiB body and 90-KiB wrapper limits keep the final Linux
+environment string below 128 KiB. ACA does not document a separate environment
+value limit, so the real canary must also cover the largest expected envelope.
+
+#### Evidence and open compatibility question
+
+As reviewed on 2026-09-02:
+
+| Level | What is established |
+| --- | --- |
+| Microsoft official documentation | [ACA Jobs](https://learn.microsoft.com/azure/container-apps/jobs) are finite tasks; manual executions can be started through ARM, accept a full-template override, use exit status, timeout, retry, parallelism, and completion settings, and can have no active replica between executions. The same page states that job starters gain access to configured secrets. |
+| Microsoft official documentation | [ACA storage](https://learn.microsoft.com/azure/container-apps/storage-mounts) says the container filesystem is writable ephemeral storage, `EmptyDir` lasts for a replica, and Azure Files is persistent. This design does **not** call ACA's ordinary container root read-only. |
+| Microsoft official schema | The stable [`Microsoft.App/jobs@2025-01-01`](https://learn.microsoft.com/azure/templates/microsoft.app/jobs) container shape exposes command, args, env, image, probes, resources, and volume mounts. It exposes no customer security context for capabilities, seccomp, AppArmor, privileged mode, user namespaces, or `readOnlyRootFilesystem`. Absence of that control surface does not prove which host syscalls ACA permits. |
+| Bubblewrap official documentation | [Bubblewrap](https://github.com/containers/bubblewrap) requires a user namespace when non-root, always creates a mount namespace, uses a tmpfs root, and can create PID/network/IPC/UTS namespaces and read-only bind mounts. Its maintainers also state that the caller's arguments define the security policy. |
+| Local container probe only | `npm run probe:bwrap:container` builds the exact ACA image and runs it non-root with read-only OCI root, all capabilities dropped, no-new-privileges, no Docker socket, no network, and only explicit tmpfs state/work paths. Passing proves that local runtime/profile only, not ACA. |
+| Must be proved by real ACA canary | ACA host seccomp/AppArmor, unprivileged and nested user namespaces, namespace-local mount operations, outer no-new-privileges/capability state, exact workload-profile kernel behavior, and Azure Files atomic-create/`fsync` behavior. Microsoft documentation does not promise these Bubblewrap requirements. |
+
+The local probe is reusable and intentionally uses Docker's standard seccomp
+profile; it does not install a permissive profile. On a host where Docker is
+unavailable or the standard profile rejects Bubblewrap, the result is
+inconclusive for ACA but the deployment remains disabled. A passing local
+probe is necessary evidence for the image, not sufficient evidence for ACA.
+No passing local or ACA probe result is asserted by the repository itself.
+
+#### Build, canary, enable, and rollback
+
+Build from the repository root so the verified JRE materializer can read both
+locks:
+
+```text
+docker build --file compiler/Dockerfile.aca \
+  --tag xmcl-compiler-aca:local .
+cd compiler
+npm run probe:bwrap:container
+```
+
+The two lock files are forced to LF by the repository `.gitattributes` because
+the reviewed `runtimeCatalogRevision` hashes the exact raw runtime lock bytes.
+The build and standard validation command do not perform hidden normalization.
+
+The deployment pipeline must publish by digest and pass only
+the 64-character lowercase digest as `compilerImageDigest`; the Bicep template
+constructs the fixed
+`ghcr.io/voxelum/xmcl-shared-node-compiler@sha256:<digest>` reference. Deploy
+`deploy/aca-job.bicep`, the
+existing VNet-integrated managed-environment resource ID, exact workload
+profile, and the existing durable storage name. The canary form contains no
+compiler HMAC secret or worker configuration.
+
+Start the probe without an execution override. Require a successful execution
+and both canary JSON records. The inner production-sandbox record must contain
+these `true` fields:
+`networkNamespaceIsolated`, `pidNamespaceIsolated`, `readOnlyJre`,
+`readOnlySystem`, `writableWorkspace`, `nestedBubblewrap`,
+`noNewPrivileges`, `productionJreRegistry`, and
+`productionSandboxAdapter`. The outer record must contain
+`productionOuterSandbox`, `durableExecutionLease`, `durableReplayState`, and
+`durableQueueState`.
+Confirm the execution used the expected image digest and workload profile.
+Re-run after every image, ACA environment/workload-profile, kernel, or storage
+change.
+
+There is currently no promotion command. Before adding one, implement a
+protected CI workflow or trusted control-plane operation that uses an
+Azure-federated deployment identity to query the real ACA execution and logs,
+requires a successful canary execution, validates every exact probe field, and
+binds the evidence to the immutable image digest, managed-environment resource
+ID, storage definition, and workload profile. The same protected operation
+must construct the enabled deployment itself; it must not emit a reusable
+user-editable approval file or accept those bindings back as ordinary
+parameters. Repository/environment protection and human approval are still
+required, but neither is a cryptographic runtime attestation by itself.
+
+After such a promoter exists, run a disposable signed deployment canary and
+require an exact terminal callback and immutable object reconciliation before
+routing production deployments. Supply the base64 of
+`deploy/worker.aca.example.json` after replacing its invalid example
+origin/key ID and a protected base64 HMAC secret only inside that protected
+operation. Do not put either value in source control or CLI history. Network
+controls belong to the existing
+VNet/UDR/firewall: permit HTTPS only to the exact control-plane/object-grant
+origins and reviewed catalog hosts, plus Azure Files transport required by the
+mounted share. ACA Jobs have no ingress and this template enables none.
+
+Until that promoter exists, keep the VM/systemd worker as production and use
+the ACA resource only for canaries. A future rollback must first stop new ACA
+starts or redeploy the canary-only template, let active executions reach their
+terminal callback or timeout, and retain the replay/queue share before resuming
+the Ubuntu systemd worker against the same idempotency contract. If ACA cannot
+pass Bubblewrap, keep VM/systemd, or move to a dedicated AKS node pool where a
+narrowly reviewed runtime seccomp/AppArmor and user-namespace configuration
+can be controlled. Removing the inner network namespace or running the
+compiler directly in a standard ACA container is not an accepted fallback.
 
 ### Ubuntu 24.04 staging deployment contract
 

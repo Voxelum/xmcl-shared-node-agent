@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   DeterministicFakeArtifactDownloader,
@@ -15,7 +18,12 @@ import {
   readBoundedCallbackBody,
 } from "../src/http-worker.mjs";
 import { HmacServiceIdentity, InMemoryReplayCache } from "../src/service-identity.mjs";
-import { MemoryCompilerJobQueue } from "../src/job-queue.mjs";
+import { FilesystemCompilerJobQueue, MemoryCompilerJobQueue } from "../src/job-queue.mjs";
+import {
+  acquireExecutionLease,
+  parseAcaDelivery,
+  runAcaCompilerJob,
+} from "../src/aca-job-runner.mjs";
 
 const encoder = new TextEncoder();
 
@@ -180,6 +188,97 @@ test("authenticated HTTP worker validates grants, uses the fake isolated sandbox
   assert.deepEqual(callbackEvents[1].content, callbackEvents[0].content);
   assert.deepEqual(callbackEvents[1].descriptor, callbackEvents[0].descriptor);
   assert.deepEqual(await jobQueue.counts(), { pending: 0, archived: 2 });
+});
+
+test("ACA recovery requires a fresh envelope for the stable queued request", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "xmcl-aca-recovery-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixture = compilerFixture();
+  const secret = "local-integration-test-secret-must-be-32-bytes";
+  let now = Date.now();
+  let failedCallbacks = 0;
+  const callbackServer = createServer(async (request, response) => {
+    await readBody(request);
+    if (request.url.endsWith("/grants")) {
+      const grants = structuredClone(fixture.grants);
+      for (const grant of grants.grants) {
+        grant.expiresAt = new Date(now + 60_000).toISOString();
+      }
+      response.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify(grants));
+    } else if (request.url.endsWith("/failed")) {
+      failedCallbacks += 1;
+      response.writeHead(204).end();
+    } else {
+      response.writeHead(500).end();
+    }
+  });
+  const callbackAddress = await listen(callbackServer);
+  t.after(() => close(callbackServer));
+
+  const requestIdentity = identity("control-plane", secret, () => now);
+  const callbackIdentity = identity("callback", secret, () => now);
+  const sandboxAdapter = new DeterministicFakeSandboxRunner({ fail: true });
+  const objectFetch = objectStore(fixture);
+  const callbackOrigin = `http://127.0.0.1:${callbackAddress.port}`;
+  const pathsFactory = () => ({ queueRoot: join(root, "jobs") });
+  const workerFactory = async ({ paths }) => new CompilerHttpWorker({
+    ...reviewedDependencies(fixture, sandboxAdapter),
+    requestAuthenticator: requestIdentity,
+    callback: {
+      controlPlaneOrigin: callbackOrigin,
+      authenticator: callbackIdentity,
+    },
+    fetchImpl: (url, options) =>
+      url.startsWith(callbackOrigin) ? fetch(url, options) : objectFetch(url, options),
+    jobQueue: new FilesystemCompilerJobQueue({ directory: paths.queueRoot }),
+    now: () => now,
+    allowInsecureForTests: true,
+  });
+  const deliveryPath = join(root, "delivery.json");
+  const leaseRoot = join(root, "leases");
+  const leaseFactory = (requestId) => acquireExecutionLease(requestId, {
+    root: leaseRoot,
+    now: () => now,
+    leaseMs: 1_000,
+  });
+
+  const oldEnvelope = messageForAt(fixture, now);
+  const oldDelivery = await signedAcaDelivery(oldEnvelope,
+    identity("control-plane", secret, () => now));
+  await writeFile(deliveryPath, JSON.stringify(oldDelivery));
+  const firstWorker = await workerFactory({ paths: pathsFactory() });
+  await firstWorker.initialize();
+  await firstWorker.consume(parseAcaDelivery(encoder.encode(JSON.stringify(oldDelivery))));
+  assert.equal((await firstWorker.queue.claim(fixture.job.compilerRequestId)).id,
+    fixture.job.compilerRequestId);
+  await leaseFactory(fixture.job.compilerRequestId);
+
+  now += 2 * 60_000;
+  await assert.rejects(() => runAcaCompilerJob({
+    deliveryPath,
+    workerFactory,
+    acquireLease: leaseFactory,
+    pathsFactory,
+  }), (error) => error?.code === "request_unauthorized");
+  assert.equal(failedCallbacks, 0);
+
+  const freshEnvelope = messageForAt(fixture, now);
+  const freshDelivery = await signedAcaDelivery(freshEnvelope,
+    identity("control-plane", secret, () => now));
+  await writeFile(deliveryPath, JSON.stringify(freshDelivery));
+  const recovered = await runAcaCompilerJob({
+    deliveryPath,
+    workerFactory,
+    acquireLease: leaseFactory,
+    pathsFactory,
+  });
+  assert.equal(recovered.accepted.deploymentId, fixture.job.deploymentId);
+  assert.equal(recovered.outcome.status, "failed");
+  assert.equal(failedCallbacks, 1);
+  const recoveredQueue = new FilesystemCompilerJobQueue({ directory: pathsFactory().queueRoot });
+  await recoveredQueue.initialize();
+  assert.deepEqual(await recoveredQueue.counts(), { pending: 0, archived: 1 });
 });
 
 test("default HTTP composition remains fail closed while serving liveness", async (t) => {
@@ -800,12 +899,36 @@ function objectStore(fixture) {
   };
 }
 
-function identity(keyId, secret) {
+function identity(keyId, secret, clock = Date.now) {
   return new HmacServiceIdentity({
     keyId,
     secret,
     nonceStore: new InMemoryReplayCache(),
+    clock,
   });
+}
+
+function messageForAt(fixture, now) {
+  return {
+    ...messageFor(fixture),
+    issuedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 60_000).toISOString(),
+  };
+}
+
+async function signedAcaDelivery(envelope, signer) {
+  const body = encoder.encode(JSON.stringify(envelope));
+  return {
+    schemaVersion: 1,
+    method: "POST",
+    target: "/v1/compiler-jobs",
+    headers: await signer.signOutgoing({
+      method: "POST",
+      target: "/v1/compiler-jobs",
+      body,
+    }),
+    bodyBase64: Buffer.from(body).toString("base64"),
+  };
 }
 
 async function postSigned({ url, signer, envelope, reuseHeadersFrom }) {

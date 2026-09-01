@@ -35,7 +35,11 @@ export async function createProductionCompilerWorker({
   fetchImpl = fetch,
   mountInspector,
   sandboxRunner,
+  startWorker = true,
 } = {}) {
+  if (typeof startWorker !== "boolean") {
+    throw new TypeError("invalid production worker start mode");
+  }
   validatePathSet(paths);
   const config = await loadJson(paths.configuration);
   validateConfiguration(config, paths);
@@ -106,7 +110,7 @@ export async function createProductionCompilerWorker({
       directory: paths.queueRoot,
     }),
   });
-  await worker.start();
+  if (startWorker) await worker.start();
   return worker;
 }
 
