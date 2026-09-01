@@ -77,7 +77,7 @@ func (m *Manager) restoreInitialRuntimeContent(ctx context.Context, command cont
 		return "", errors.New("initial runtime content does not match selected descriptor")
 	}
 	extractionRoot := filepath.Join(stagingBase, "workspace")
-	if _, err := extractArchive(archivePath, extractionRoot, content, map[string]struct{}{}, workspaceLimit(command)); err != nil {
+	if _, err := extractArchive(archivePath, extractionRoot, content, map[string]struct{}{}, workspaceLimit(command), false); err != nil {
 		return "", err
 	}
 	if err := m.activateStaging(ctx, command, extractionRoot, workspacePath); err != nil {
@@ -311,8 +311,12 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 		if err := validateRuntimeContent(*command.RuntimeContent, command); err != nil {
 			return "", err
 		}
+		replacingRuntime := manifest.Content == nil ||
+			!sameArchive(*manifest.Content, *command.RuntimeContent)
 		manifest.Content = command.RuntimeContent
-		manifest.Config = nil
+		if replacingRuntime {
+			manifest.Config = nil
+		}
 		manifest.LogicalSize = logicalSize(manifestDescriptors(manifest))
 		manifest.AggregateSHA256 = aggregateDescriptors(manifestDescriptors(manifest))
 		manifest.ManifestHash = manifest.AggregateSHA256
@@ -359,7 +363,15 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 			if download.Size != descriptor.CompressedSize || download.SHA256 != descriptor.SHA256 {
 				return "", errors.New("workspace blob does not match its descriptor")
 			}
-			extracted, err := extractArchive(archivePath, extractionRoot, descriptor, seen, workspaceLimit(command))
+			configOverlay := manifest.Config != nil && descriptor.Key == manifest.Config.Key
+			extracted, err := extractArchive(
+				archivePath,
+				extractionRoot,
+				descriptor,
+				seen,
+				workspaceLimit(command),
+				configOverlay,
+			)
 			if err != nil {
 				return "", err
 			}
@@ -1153,7 +1165,7 @@ func buildArchive(path string, files []workspaceFile) (archive, error) {
 	}, nil
 }
 
-func extractArchive(path, root string, descriptor controlplane.WorkspaceBlob, seen map[string]struct{}, limit int64) (int64, error) {
+func extractArchive(path, root string, descriptor controlplane.WorkspaceBlob, seen map[string]struct{}, limit int64, allowConfigOverlay bool) (int64, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -1193,7 +1205,9 @@ func extractArchive(path, root string, descriptor controlplane.WorkspaceBlob, se
 		if _, allowed := expected[header.Name]; !allowed {
 			return 0, errors.New("workspace archive member is not in manifest mapping")
 		}
-		if _, duplicate := seen[header.Name]; duplicate {
+		_, duplicate := seen[header.Name]
+		overlay := duplicate && allowConfigOverlay && isConfigPath(header.Name)
+		if duplicate && !overlay {
 			return 0, errors.New("workspace archive contains duplicate local path")
 		}
 		target, err := safeChild(root, header.Name)
@@ -1202,6 +1216,12 @@ func extractArchive(path, root string, descriptor controlplane.WorkspaceBlob, se
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			return 0, err
+		}
+		if overlay {
+			if err := os.Remove(target); err != nil {
+				return 0, err
+			}
+			delete(seen, header.Name)
 		}
 		output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
 		if err != nil {
@@ -1384,11 +1404,23 @@ func validateManifest(manifest controlplane.WorkspaceManifest, command controlpl
 			return errors.New("workspace manifest has duplicate blob key")
 		}
 		keys[descriptor.Key] = struct{}{}
+		descriptorPaths := make(map[string]struct{}, len(descriptor.Paths))
 		for _, path := range descriptor.Paths {
 			if !validWorkspacePath(path) {
 				return errors.New("workspace manifest has an unsafe local path")
 			}
-			if _, duplicate := paths[path]; duplicate {
+			if _, duplicate := descriptorPaths[path]; duplicate {
+				return errors.New("workspace manifest has duplicate local path")
+			}
+			descriptorPaths[path] = struct{}{}
+			_, duplicate := paths[path]
+			configOverlay := duplicate &&
+				manifest.Config != nil &&
+				descriptor.Key == manifest.Config.Key &&
+				isConfigPath(path) &&
+				manifest.Content != nil &&
+				containsPath(manifest.Content.Paths, path)
+			if duplicate && !configOverlay {
 				return errors.New("workspace manifest has duplicate local path")
 			}
 			paths[path] = struct{}{}

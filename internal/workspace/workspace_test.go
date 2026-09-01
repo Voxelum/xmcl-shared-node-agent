@@ -487,7 +487,7 @@ func TestExtractArchiveRejectsTraversalDuplicateAndBomb(t *testing.T) {
 		t.Fatal(err)
 	}
 	descriptor := controlplane.WorkspaceBlob{Key: "x", SHA256: sum, CompressedSize: size, LogicalSize: 2, Paths: []string{"world/ok"}}
-	if _, err := extractArchive(path, t.TempDir(), descriptor, map[string]struct{}{}, 10); err == nil {
+	if _, err := extractArchive(path, t.TempDir(), descriptor, map[string]struct{}{}, 10, false); err == nil {
 		t.Fatal("duplicate archive member was accepted")
 	}
 }
@@ -554,7 +554,7 @@ func TestExtractArchiveRejectsTraversalSymlinkAndOversizedMembers(t *testing.T) 
 			test.descriptor.Key = "shared-hosting/a/s/revisions/1/world/test.tar.zst"
 			test.descriptor.SHA256 = sum
 			test.descriptor.CompressedSize = size
-			if _, err := extractArchive(path, t.TempDir(), test.descriptor, map[string]struct{}{}, test.limit); err == nil {
+			if _, err := extractArchive(path, t.TempDir(), test.descriptor, map[string]struct{}{}, test.limit, false); err == nil {
 				t.Fatal("unsafe archive member was accepted")
 			}
 		})
@@ -641,6 +641,40 @@ func TestValidateManifestAcceptsPriorCompilerContentDuringReplacement(t *testing
 	manifest.ManifestHash = manifest.AggregateSHA256
 	if err := validateManifest(manifest, command); err != nil {
 		t.Fatalf("prior compiler content was rejected during replacement: %v", err)
+	}
+}
+
+func TestValidateManifestAcceptsConfigOverlayForCompilerContent(t *testing.T) {
+	command := stopCommand()
+	command.Kind = controlplane.RestoreAndStart
+	content := controlplane.WorkspaceBlob{
+		Key:            "shared-hosting/account_1/service_1/compiler-content/runtime.tar.zst",
+		SHA256:         strings.Repeat("a", 64),
+		CompressedSize: 2,
+		LogicalSize:    2,
+		Paths:          []string{".xmcl/launch.sh", ".xmcl/runtime.json", "config/fml.toml"},
+	}
+	command.RuntimeContent = &content
+	manifest := controlplane.WorkspaceManifest{
+		SchemaVersion: 2,
+		ServiceID:     command.ServiceID,
+		AssignmentID:  "previous_assignment",
+		Revision:      command.Workspace.Revision,
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+		Content:       &content,
+		Config: &controlplane.WorkspaceBlob{
+			Key:            "shared-hosting/account_1/service_1/revisions/2/config.tar.zst",
+			SHA256:         strings.Repeat("b", 64),
+			CompressedSize: 1,
+			LogicalSize:    1,
+			Paths:          []string{"config/fml.toml"},
+		},
+		LogicalSize: 3,
+	}
+	manifest.AggregateSHA256 = aggregateDescriptors(manifestDescriptors(manifest))
+	manifest.ManifestHash = manifest.AggregateSHA256
+	if err := validateManifest(manifest, command); err != nil {
+		t.Fatalf("compiler config overlay was rejected: %v", err)
 	}
 }
 
