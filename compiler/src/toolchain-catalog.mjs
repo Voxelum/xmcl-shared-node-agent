@@ -46,6 +46,11 @@ export const SUPPORTED_TOOLCHAIN_CANDIDATES = Object.freeze([
     java: { component: "java-runtime-delta", major: 21 },
   },
   {
+    minecraftVersion: "1.21.1",
+    loader: { kind: "neoforge", version: "21.1.249" },
+    java: { component: "java-runtime-delta", major: 21 },
+  },
+  {
     minecraftVersion: "26.2",
     loader: { kind: "fabric", version: "0.19.3" },
     java: { component: "java-runtime-epsilon", major: 25 },

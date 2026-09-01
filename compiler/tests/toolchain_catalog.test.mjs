@@ -86,6 +86,7 @@ function runtimeCatalog(candidates = SUPPORTED_TOOLCHAIN_CANDIDATES) {
 function fixtureNetwork(candidates = SUPPORTED_TOOLCHAIN_CANDIDATES) {
   const responses = new Map();
   const versions = [];
+  const mavenVersions = new Map();
   for (const candidate of candidates) {
     const versionUrl = `https://piston-meta.mojang.com/versions/${candidate.minecraftVersion}.json`;
     const serverBytes = bytes(`server:${candidate.minecraftVersion}`);
@@ -146,7 +147,9 @@ function fixtureNetwork(candidates = SUPPORTED_TOOLCHAIN_CANDIDATES) {
       })));
     }
     const metadataBytes = bytes(JSON.stringify(metadata));
-    versions.push({ id: candidate.minecraftVersion, url: versionUrl, sha1: sha1(metadataBytes) });
+    if (!versions.some((entry) => entry.id === candidate.minecraftVersion)) {
+      versions.push({ id: candidate.minecraftVersion, url: versionUrl, sha1: sha1(metadataBytes) });
+    }
     responses.set(versionUrl, response(metadataBytes));
     responses.set(primary, response(primaryBytes));
     if (candidate.loader.kind === "fabric") {
@@ -180,13 +183,19 @@ function fixtureNetwork(candidates = SUPPORTED_TOOLCHAIN_CANDIDATES) {
       const version = forge
         ? `${candidate.minecraftVersion}-${candidate.loader.version}`
         : candidate.loader.version;
-      responses.set(metadataUrl, response(bytes(
-        `<?xml version="1.0" encoding="UTF-8"?><metadata><groupId>${groupId}</groupId>` +
-        `<artifactId>${artifactId}</artifactId><versioning><versions><version>${version}</version>` +
-        "</versions></versioning></metadata>",
-      )));
+      const metadata = mavenVersions.get(metadataUrl) ?? { groupId, artifactId, versions: [] };
+      metadata.versions.push(version);
+      mavenVersions.set(metadataUrl, metadata);
       responses.set(`${primary}.sha1`, response(bytes(sha1(primaryBytes))));
     }
+  }
+  for (const [metadataUrl, metadata] of mavenVersions) {
+    responses.set(metadataUrl, response(bytes(
+      `<?xml version="1.0" encoding="UTF-8"?><metadata><groupId>${metadata.groupId}</groupId>` +
+      `<artifactId>${metadata.artifactId}</artifactId><versioning><versions>` +
+      metadata.versions.map((version) => `<version>${version}</version>`).join("") +
+      "</versions></versioning></metadata>",
+    )));
   }
   responses.set(
     "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
@@ -243,6 +252,7 @@ test("official Forge, Fabric, NeoForge, and Quilt metadata fixtures generate exa
       "net.fabricmc:fabric-loader:0.12.12",
       "net.fabricmc:fabric-loader:0.15.11",
       "net.neoforged:neoforge:21.1.115:installer",
+      "net.neoforged:neoforge:21.1.249:installer",
       "org.quiltmc:quilt-loader:0.28.0",
       "net.fabricmc:fabric-loader:0.19.3",
     ],
