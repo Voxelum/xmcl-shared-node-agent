@@ -1403,10 +1403,7 @@ func validateManifest(manifest controlplane.WorkspaceManifest, command controlpl
 		if !allPaths(manifest.Content.Paths, isContentPath) {
 			return errors.New("workspace manifest content layer is invalid")
 		}
-	} else if command.RuntimeContent == nil ||
-		!isCompilerContent(*manifest.Content) ||
-		!sameArchive(*manifest.Content, *command.RuntimeContent) ||
-		!allPaths(manifest.Content.Paths, isRuntimeContentPath) {
+	} else if validateRuntimeContent(*manifest.Content, command) != nil {
 		return errors.New("workspace manifest content layer is invalid")
 	}
 	if manifest.Config != nil {

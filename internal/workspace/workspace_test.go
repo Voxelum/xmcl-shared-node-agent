@@ -605,6 +605,45 @@ func TestValidateManifestRejectsForeignKeysAndLayerMappings(t *testing.T) {
 	}
 }
 
+func TestValidateManifestAcceptsPriorCompilerContentDuringReplacement(t *testing.T) {
+	command := stopCommand()
+	command.Kind = controlplane.RestoreAndStart
+	command.RuntimeContent = &controlplane.WorkspaceBlob{
+		Key:            "shared-hosting/account_1/service_1/compiler-content/new.tar.zst",
+		SHA256:         strings.Repeat("b", 64),
+		CompressedSize: 2,
+		LogicalSize:    2,
+		Paths:          []string{".xmcl/launch.sh", ".xmcl/runtime.json", "mods/new.jar"},
+	}
+	manifest := controlplane.WorkspaceManifest{
+		SchemaVersion: 2,
+		ServiceID:     command.ServiceID,
+		AssignmentID:  "previous_assignment",
+		Revision:      command.Workspace.Revision,
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+		Content: &controlplane.WorkspaceBlob{
+			Key:            "shared-hosting/account_1/service_1/compiler-content/old.tar.zst",
+			SHA256:         strings.Repeat("a", 64),
+			CompressedSize: 1,
+			LogicalSize:    1,
+			Paths:          []string{".xmcl/launch.sh", ".xmcl/runtime.json", "mods/old.jar"},
+		},
+		Config: &controlplane.WorkspaceBlob{
+			Key:            "shared-hosting/account_1/service_1/revisions/2/config.tar.zst",
+			SHA256:         strings.Repeat("c", 64),
+			CompressedSize: 1,
+			LogicalSize:    1,
+			Paths:          []string{"config/fml.toml"},
+		},
+		LogicalSize: 2,
+	}
+	manifest.AggregateSHA256 = aggregateDescriptors(manifestDescriptors(manifest))
+	manifest.ManifestHash = manifest.AggregateSHA256
+	if err := validateManifest(manifest, command); err != nil {
+		t.Fatalf("prior compiler content was rejected during replacement: %v", err)
+	}
+}
+
 func TestDirectTransferRejectsForeignURL(t *testing.T) {
 	transfer, err := NewDirectTransfer("https://xmclstaging.blob.core.windows.net", "bucket", nil)
 	if err != nil {
