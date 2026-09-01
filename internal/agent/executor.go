@@ -55,6 +55,17 @@ func retryable(err error) error {
 	return &RetryableError{err: err}
 }
 
+// TerminalStartError means the restored workspace cannot become a healthy
+// server without a new user or operator action. The command is acknowledged
+// as failed and its assignment is released instead of retried forever.
+type TerminalStartError struct {
+	Code string
+	Err  error
+}
+
+func (e *TerminalStartError) Error() string { return e.Err.Error() }
+func (e *TerminalStartError) Unwrap() error { return e.Err }
+
 type RunningService struct {
 	ServiceID      string
 	AssignmentID   string
@@ -87,7 +98,7 @@ func NewExecutor(nodeID string, store StateStore, workspace Workspace, runtime C
 func (e *Executor) Execute(ctx context.Context, command controlplane.Command) (controlplane.CommandResult, error) {
 	if result, ok, err := e.store.Result(command.CommandID); err != nil {
 		return controlplane.CommandResult{}, err
-	} else if ok && result.Status != "failed" {
+	} else if ok && (result.Status != "failed" || result.Code != "") {
 		return result, nil
 	}
 
@@ -101,7 +112,7 @@ func (e *Executor) Execute(ctx context.Context, command controlplane.Command) (c
 	defer func() { _ = unlock() }()
 	if result, ok, err := e.store.Result(command.CommandID); err != nil {
 		return controlplane.CommandResult{}, err
-	} else if ok && result.Status != "failed" {
+	} else if ok && (result.Status != "failed" || result.Code != "") {
 		return result, nil
 	}
 	result, active, executeErr := e.execute(ctx, command)
@@ -218,6 +229,13 @@ func (e *Executor) execute(ctx context.Context, command controlplane.Command) (c
 			}
 		}
 		if err := e.runtime.Start(ctx, command, path); err != nil {
+			var terminal *TerminalStartError
+			if errors.As(err, &terminal) {
+				return controlplane.CommandResult{
+					Status: "failed", Code: terminal.Code,
+					Message: terminal.Error(),
+				}, nil, nil
+			}
 			return controlplane.CommandResult{}, &starting, retryable(fmt.Errorf("start container: %w", err))
 		}
 		return controlplane.CommandResult{Status: "started"}, &ActiveAssignment{AssignmentID: command.AssignmentID, Phase: "running"}, nil

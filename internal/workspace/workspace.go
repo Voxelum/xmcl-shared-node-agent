@@ -252,7 +252,7 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 			success = true
 			return path, nil
 		}
-		path, err := m.activateEmptyWorkspace(command, workspacePath)
+		path, err := m.activateEmptyWorkspace(ctx, command, workspacePath)
 		if err != nil {
 			return "", err
 		}
@@ -811,12 +811,15 @@ func (m *Manager) uploadBytes(
 	return false, errors.New("unreachable upload retry")
 }
 
-func (m *Manager) activateEmptyWorkspace(command controlplane.Command, workspacePath string) (string, error) {
+func (m *Manager) activateEmptyWorkspace(ctx context.Context, command controlplane.Command, workspacePath string) (string, error) {
 	staging := filepath.Join(m.root, ".staging", command.ServiceID+"-"+command.CommandID, "workspace")
 	if err := os.RemoveAll(staging); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(staging, 0o750); err != nil {
+		return "", err
+	}
+	if err := m.sealReplacedWorkspaces(ctx, workspacePath); err != nil {
 		return "", err
 	}
 	if err := replaceWorkspace(staging, workspacePath); err != nil {
@@ -826,6 +829,9 @@ func (m *Manager) activateEmptyWorkspace(command controlplane.Command, workspace
 }
 
 func (m *Manager) activateStaging(ctx context.Context, command controlplane.Command, staging, workspacePath string) error {
+	if err := m.sealReplacedWorkspaces(ctx, workspacePath); err != nil {
+		return err
+	}
 	backup, err := replaceWorkspaceWithBackup(staging, workspacePath)
 	if err != nil {
 		return err
@@ -839,6 +845,25 @@ func (m *Manager) activateStaging(ctx context.Context, command controlplane.Comm
 	}
 	if backup != "" {
 		_ = os.RemoveAll(backup)
+	}
+	return nil
+}
+
+func (m *Manager) sealReplacedWorkspaces(ctx context.Context, workspacePath string) error {
+	for _, path := range []string{workspacePath, workspacePath + ".previous"} {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect replaced workspace ownership: %w", err)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("replaced workspace must be a real directory")
+		}
+		if err := m.quota.Seal(ctx, path); err != nil {
+			return fmt.Errorf("seal replaced workspace ownership: %w", err)
+		}
 	}
 	return nil
 }

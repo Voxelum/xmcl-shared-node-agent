@@ -24,12 +24,9 @@ image_file="$state_root/workspace.xfs"
 image_size_gib="${XMCL_MOCK_LIGHTNODE_DISK_GIB:-4}"
 runtime_image="${XMCL_MOCK_LIGHTNODE_RUNTIME_IMAGE:-xmcl/mock-lightnode-runtime:local}"
 base_image="${XMCL_MOCK_LIGHTNODE_BASE_IMAGE:-}"
-agent_user="${XMCL_MOCK_LIGHTNODE_AGENT_USER:-}"
-if [[ -z "$agent_user" ]]; then
-  agent_user="$(getent passwd 1000 | cut -d: -f1)"
-fi
-if [[ -z "$agent_user" || "$agent_user" == root ]]; then
-  echo "set XMCL_MOCK_LIGHTNODE_AGENT_USER to the non-root node-agent account" >&2
+agent_user="${XMCL_MOCK_LIGHTNODE_AGENT_USER:-xmcl-mock-agent}"
+if [[ "$agent_user" == root ]]; then
+  echo "XMCL_MOCK_LIGHTNODE_AGENT_USER must be a non-root account" >&2
   exit 1
 fi
 
@@ -52,9 +49,6 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 if [[ -n "$base_image" ]]; then
   cat >"$temporary/Dockerfile" <<EOF
 FROM $base_image
-USER 0:0
-COPY xmcl-shared-minecraft-runtime /usr/local/bin/xmcl-shared-minecraft-runtime
-USER 1000:1000
 EOF
 else
   catalog_sha="$(sed -n 's/.*"sha256": "\([a-f0-9]\{64\}\)".*/\1/p' \
@@ -97,6 +91,17 @@ docker build --quiet --tag "$runtime_image" "$temporary" >/dev/null
 
 sudo install -d -m 0755 "$state_root" "$mount_path" \
   /usr/local/libexec /etc/xmcl-shared-node-agent
+if ! id "$agent_user" >/dev/null 2>&1; then
+  sudo groupadd --system "$agent_user"
+  sudo useradd --system --gid "$agent_user" --groups docker \
+    --home-dir "$state_root" --no-create-home --shell /usr/sbin/nologin \
+    "$agent_user"
+fi
+sudo usermod -aG docker "$agent_user"
+if [[ "$(id -u "$agent_user")" == 1000 ]]; then
+  echo "the mock agent UID must differ from the runtime UID 1000" >&2
+  exit 1
+fi
 if [[ ! -f "$image_file" ]]; then
   sudo truncate -s "${image_size_gib}G" "$image_file"
   sudo mkfs.xfs -f "$image_file" >/dev/null
@@ -111,7 +116,12 @@ if [[ "$(findmnt -no FSTYPE "$mount_path")" != xfs ]] ||
 fi
 
 agent_group="$(id -gn "$agent_user")"
-sudo install -d -m 0750 -o "$agent_user" -g "$agent_group" "$workspace_root"
+sudo install -d -m 0750 -o "$agent_user" -g "$agent_group" \
+  "$workspace_root" "$workspace_root/.staging" "$workspace_root/.state"
+sudo chown -R "$agent_user:$agent_group" \
+  "$workspace_root/.staging" "$workspace_root/.state"
+sudo chmod -R u+rwX "$workspace_root/.staging" "$workspace_root/.state"
+sudo rm -rf "$workspace_root/.acceptance-state"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
   -buildvcs=false -trimpath -ldflags "-s -w" \
   -o "$temporary/xmcl-quota-helper" \
@@ -127,8 +137,14 @@ sudo install -o root -g root -m 0644 "$temporary/quota-helper.json" \
 
 (
   cd "$repository"
+  go test -buildvcs=false -tags=integration ./internal/docker \
+    -run '^$' -count=1
+  go test -buildvcs=false -tags=integration -c ./internal/docker \
+    -o "$temporary/lightnode-acceptance.test"
+)
+chmod 0755 "$temporary" "$temporary/lightnode-acceptance.test"
+sudo -u "$agent_user" env \
   XMCL_ACCEPTANCE_RUNTIME_IMAGE="$runtime_image" \
   XMCL_ACCEPTANCE_WORKSPACE_ROOT="$workspace_root" \
-    go test -buildvcs=false -tags=integration ./internal/docker \
-      -run '^TestMockLightNodeDockerLifecycle$' -count=1 -v
-)
+  "$temporary/lightnode-acceptance.test" \
+    -test.run '^TestMockLightNodeDockerLifecycle$' -test.count=1 -test.v

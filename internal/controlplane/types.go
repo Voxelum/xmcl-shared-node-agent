@@ -152,6 +152,7 @@ type WorkspaceGrantClient interface {
 
 type CommandResult struct {
 	Status  string      `json:"status"`
+	Code    string      `json:"code,omitempty"`
 	Message string      `json:"message,omitempty"`
 	Sync    *SyncResult `json:"sync,omitempty"`
 }

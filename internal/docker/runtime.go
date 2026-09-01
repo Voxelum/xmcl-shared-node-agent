@@ -198,10 +198,10 @@ func (r *Runtime) containerMetrics(ctx context.Context, containerID string, memo
 
 func (r *Runtime) Start(ctx context.Context, command controlplane.Command, workspacePath string) error {
 	if command.RuntimeContent == nil {
-		return errors.New("shared modded runtime start requires compiler-selected runtime content")
+		return terminalStart("runtime_content_missing", errors.New("shared modded runtime start requires compiler-selected runtime content"))
 	}
 	if _, err := runtimecontract.ValidateWorkspace(workspacePath, command.RuntimeContent.SHA256); err != nil {
-		return fmt.Errorf("validate compiler runtime descriptor: %w", err)
+		return terminalStart("runtime_descriptor_invalid", fmt.Errorf("validate compiler runtime descriptor: %w", err))
 	}
 	name, err := containerName(command.ServiceID)
 	if err != nil {
@@ -227,7 +227,7 @@ func (r *Runtime) Start(ctx context.Context, command controlplane.Command, works
 
 	config, hostConfig, err := BuildCreateRequest(command, workspacePath, r.image)
 	if err != nil {
-		return err
+		return terminalStart("runtime_request_invalid", err)
 	}
 	config.Image = r.dockerImage
 	created, err := r.client.ContainerCreate(ctx, config, hostConfig, nil, nil, name)
@@ -442,19 +442,19 @@ func (r *Runtime) waitHealthy(ctx context.Context, id string) error {
 			return fmt.Errorf("inspect container health: %w", err)
 		}
 		if !inspect.State.Running {
-			return errors.New("Minecraft container exited before becoming healthy")
+			return terminalStart("container_exited", errors.New("Minecraft container exited before becoming healthy"))
 		}
 		if inspect.State.Health == nil {
-			return errors.New("container image must define a Docker health check")
+			return terminalStart("health_check_missing", errors.New("container image must define a Docker health check"))
 		}
 		switch inspect.State.Health.Status {
 		case "healthy":
 			return nil
 		case "unhealthy":
-			return errors.New("Minecraft container health check failed")
+			return terminalStart("health_check_failed", errors.New("Minecraft container health check failed"))
 		}
 		if time.Now().After(deadline) {
-			return errors.New("timed out waiting for Minecraft container health check")
+			return terminalStart("health_check_timeout", errors.New("timed out waiting for Minecraft container health check"))
 		}
 		select {
 		case <-ctx.Done():
@@ -462,6 +462,10 @@ func (r *Runtime) waitHealthy(ctx context.Context, id string) error {
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+func terminalStart(code string, err error) error {
+	return &agent.TerminalStartError{Code: code, Err: err}
 }
 
 func containerName(serviceID string) (string, error) {

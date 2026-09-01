@@ -242,6 +242,60 @@ func TestStartingStateResumesWithoutReplacingWorkspace(t *testing.T) {
 	}
 }
 
+func TestTerminalStartFailureClearsAssignmentAndAllowsReplacement(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &fakeWorkspace{}
+	runtime := &fakeRuntime{startErr: &TerminalStartError{
+		Code: "runtime_descriptor_invalid",
+		Err:  errors.New("runtime descriptor catalog is incompatible"),
+	}}
+	executor := NewExecutor("node_1", store, workspace, runtime)
+	first := testCommand(
+		controlplane.RestoreAndStart,
+		"start_1",
+		"node_1",
+		"assignment_1",
+	)
+	result, err := executor.Execute(context.Background(), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "failed" ||
+		result.Code != "runtime_descriptor_invalid" {
+		t.Fatalf("terminal start result = %#v", result)
+	}
+	if _, exists, err := store.Active(first.ServiceID); err != nil || exists {
+		t.Fatalf("terminal failure retained assignment: exists=%v err=%v", exists, err)
+	}
+
+	runtime.startErr = nil
+	replayed, err := executor.Execute(context.Background(), first)
+	if err != nil || replayed.Status != "failed" ||
+		replayed.Code != "runtime_descriptor_invalid" {
+		t.Fatalf("terminal failure replay = %#v, %v", replayed, err)
+	}
+	if workspace.restores != 1 || runtime.starts != 1 {
+		t.Fatalf("terminal failure was re-executed: restores:%d starts:%d", workspace.restores, runtime.starts)
+	}
+
+	second := testCommand(
+		controlplane.RestoreAndStart,
+		"start_2",
+		"node_1",
+		"assignment_2",
+	)
+	result, err = executor.Execute(context.Background(), second)
+	if err != nil || result.Status != "started" {
+		t.Fatalf("replacement start = %#v, %v", result, err)
+	}
+	if workspace.restores != 2 || runtime.starts != 2 {
+		t.Fatalf("replacement calls = restores:%d starts:%d", workspace.restores, runtime.starts)
+	}
+}
+
 func TestRestoreRejectsCommandWithoutAssignedConnection(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	if err != nil {

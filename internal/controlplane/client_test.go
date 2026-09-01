@@ -115,7 +115,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"leaseExpiresAt":"2026-01-01T00:01:00Z"}`))
 		case "/v1/internal/shared-nodes/node-1/commands/command-1/ack":
-			if string(body) != `{"leaseToken":"lease-token","leaseGeneration":7}` {
+			if string(body) != `{"leaseToken":"lease-token","leaseGeneration":7,"status":"started"}` {
 				t.Fatalf("acknowledgement body = %s", body)
 			}
 			_, _ = w.Write([]byte(`{"ok":true}`))

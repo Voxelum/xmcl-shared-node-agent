@@ -156,7 +156,7 @@ func compilerContent(t *testing.T) ([]byte, []string, int64) {
 		"runtimeCatalogRevision": runtimecontract.CatalogSHA256(),
 		"minecraftVersion":       "1.21.1",
 		"loader": map[string]any{
-			"kind": "neoforge", "version": "21.1.115",
+			"kind": "neoforge", "version": "21.1.249",
 		},
 		"java": map[string]any{
 			"component": "java-runtime-delta", "major": 21,
@@ -344,6 +344,51 @@ func TestMockLightNodeDockerLifecycle(t *testing.T) {
 	running, err := runtime.Running(ctx)
 	if err != nil || len(running) != 1 || running[0].ServiceID != serviceID {
 		t.Fatalf("running services = %#v, %v", running, err)
+	}
+
+	exec, err := api.ContainerExecCreate(ctx, name, container.ExecOptions{
+		Cmd: []string{
+			"/bin/sh", "-c",
+			"umask 077; printf stale > .xmcl/retry-owned.log",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.ContainerExecStart(ctx, exec.ID, container.ExecStartOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		inspection, err := api.ContainerExecInspect(ctx, exec.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !inspection.Running {
+			if inspection.ExitCode != 0 {
+				t.Fatalf("create runtime-owned workspace fixture: exit %d", inspection.ExitCode)
+			}
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if err := runtime.Stop(ctx, start); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.ContainerRemove(ctx, name, container.RemoveOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	retry := start
+	retry.CommandID = "acceptance-retry"
+	retryPath, err := manager.Restore(ctx, retry)
+	if err != nil {
+		t.Fatalf("restore after an interrupted prepared workspace: %v", err)
+	}
+	if err := runtime.Start(ctx, retry, retryPath); err != nil {
+		t.Fatalf("restart after an interrupted prepared workspace: %v", err)
 	}
 
 	stop := start

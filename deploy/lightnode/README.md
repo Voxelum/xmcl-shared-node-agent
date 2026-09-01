@@ -121,8 +121,15 @@ without contacting a container registry. It uses the current Go runtime,
 reviewed catalog identity, production entrypoint, and health contract; it does
 not claim to validate every JRE bundled by the published image. Set
 `XMCL_MOCK_LIGHTNODE_BASE_IMAGE` to the published immutable runtime digest to
-replace its runtime binary and run the same lifecycle against the complete
-image.
+run the same lifecycle against the complete image without replacing any
+published binary.
+
+The acceptance binary runs as a dedicated `xmcl-mock-agent` system account
+whose UID differs from the runtime UID 1000. The lifecycle creates a
+runtime-owned, owner-only workspace file, simulates an interrupted container,
+and restores the same service again. This keeps the mock sensitive to the
+ownership transition used by the production system user instead of accidentally
+granting access because the WSL login and container share UID 1000.
 
 The first run creates a sparse 4 GiB XFS image at
 `/var/lib/xmcl-mock-lightnode/workspace.xfs`. Subsequent runs reuse it. The test

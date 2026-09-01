@@ -265,15 +265,24 @@ func (c *Client) Next(ctx context.Context, nodeID string) (Command, error) {
 	}
 }
 
-// Ack records an acknowledgement for the currently issued command lease.
-func (c *Client) Ack(ctx context.Context, commandID string, lease CommandLease, _ CommandResult) error {
+// Ack records an acknowledgement and its bounded outcome for the current lease.
+func (c *Client) Ack(ctx context.Context, commandID string, lease CommandLease, result CommandResult) error {
 	if lease.Token == "" || lease.Generation < 1 {
 		return errors.New("cannot acknowledge a command without a lease token and generation")
+	}
+	if result.Status == "" {
+		return errors.New("cannot acknowledge a command without a result status")
 	}
 	body, err := json.Marshal(struct {
 		Token      string `json:"leaseToken"`
 		Generation int64  `json:"leaseGeneration"`
-	}{Token: lease.Token, Generation: lease.Generation})
+		Status     string `json:"status"`
+		Code       string `json:"code,omitempty"`
+		Message    string `json:"message,omitempty"`
+	}{
+		Token: lease.Token, Generation: lease.Generation,
+		Status: result.Status, Code: result.Code, Message: result.Message,
+	})
 	if err != nil {
 		return fmt.Errorf("encode acknowledgement: %w", err)
 	}
