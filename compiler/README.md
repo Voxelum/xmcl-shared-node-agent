@@ -435,6 +435,16 @@ repository. Never make the probe optional and never work around it with
 privileged mode, `SYS_ADMIN`, a Docker socket, `seccomp=unconfined`, or by
 removing Bubblewrap.
 
+The real North Europe `Consumption` canary was run on 2026-09-02 with image
+digest
+`sha256:9e55b31cca611a7668f4a518c2d4b7eee1053507f9e5ce5caab82912423cb343`.
+Azure Files replay, queue, and execution-lease operations completed, but ACA
+then rejected the production outer Bubblewrap invocation with `bwrap: No
+permissions to create new namespace, likely because the kernel does not allow
+non-privileged user namespaces`. The execution exited 1 before the nested
+probe. Standard ACA Consumption is therefore not a supported production target
+for this sandbox.
+
 The dormant `job` mode in `scripts/aca_entrypoint.mjs` copies the protected
 worker config, HMAC secret, and one signed delivery into the ephemeral volume
 with mode `0400`. It then enters an outer Bubblewrap filesystem/PID/user
@@ -502,14 +512,14 @@ As reviewed on 2026-09-02:
 | Microsoft official schema | The stable [`Microsoft.App/jobs@2025-01-01`](https://learn.microsoft.com/azure/templates/microsoft.app/jobs) container shape exposes command, args, env, image, probes, resources, and volume mounts. It exposes no customer security context for capabilities, seccomp, AppArmor, privileged mode, user namespaces, or `readOnlyRootFilesystem`. Absence of that control surface does not prove which host syscalls ACA permits. |
 | Bubblewrap official documentation | [Bubblewrap](https://github.com/containers/bubblewrap) requires a user namespace when non-root, always creates a mount namespace, uses a tmpfs root, and can create PID/network/IPC/UTS namespaces and read-only bind mounts. Its maintainers also state that the caller's arguments define the security policy. |
 | Local container probe only | `npm run probe:bwrap:container` builds the exact ACA image and runs it non-root with read-only OCI root, all capabilities dropped, no-new-privileges, no Docker socket, no network, and only explicit tmpfs state/work paths. Passing proves that local runtime/profile only, not ACA. |
-| Must be proved by real ACA canary | ACA host seccomp/AppArmor, unprivileged and nested user namespaces, namespace-local mount operations, outer no-new-privileges/capability state, exact workload-profile kernel behavior, and Azure Files atomic-create/`fsync` behavior. Microsoft documentation does not promise these Bubblewrap requirements. |
+| Real North Europe ACA Consumption canary | The exact immutable image completed its Azure Files replay/queue/lease checks, then the host denied the production outer Bubblewrap user namespace with `No permissions to create new namespace`. The execution failed before nested namespace, mount, network, JRE, or sandbox-adapter checks could run. |
 
 The local probe is reusable and intentionally uses Docker's standard seccomp
 profile; it does not install a permissive profile. On a host where Docker is
 unavailable or the standard profile rejects Bubblewrap, the result is
 inconclusive for ACA but the deployment remains disabled. A passing local
 probe is necessary evidence for the image, not sufficient evidence for ACA.
-No passing local or ACA probe result is asserted by the repository itself.
+The real Consumption result is a failure and cannot be used for promotion.
 
 #### Build, canary, enable, and rollback
 
@@ -536,9 +546,11 @@ existing VNet-integrated managed-environment resource ID, exact workload
 profile, and the existing durable storage name. The canary form contains no
 compiler HMAC secret or worker configuration.
 
-Start the probe without an execution override. Require a successful execution
-and both canary JSON records. The inner production-sandbox record must contain
-these `true` fields:
+The 2026-09-02 probe was started without an execution override and failed at
+the outer user-namespace boundary described above. Do not repeat it on standard
+ACA Consumption unless the platform's namespace policy changes. Any future
+candidate platform/profile must produce both canary JSON records. The inner
+production-sandbox record must contain these `true` fields:
 `networkNamespaceIsolated`, `pidNamespaceIsolated`, `readOnlyJre`,
 `readOnlySystem`, `writableWorkspace`, `nestedBubblewrap`,
 `noNewPrivileges`, `productionJreRegistry`, and
@@ -571,15 +583,13 @@ VNet/UDR/firewall: permit HTTPS only to the exact control-plane/object-grant
 origins and reviewed catalog hosts, plus Azure Files transport required by the
 mounted share. ACA Jobs have no ingress and this template enables none.
 
-Until that promoter exists, keep the VM/systemd worker as production and use
-the ACA resource only for canaries. A future rollback must first stop new ACA
-starts or redeploy the canary-only template, let active executions reach their
-terminal callback or timeout, and retain the replay/queue share before resuming
-the Ubuntu systemd worker against the same idempotency contract. If ACA cannot
-pass Bubblewrap, keep VM/systemd, or move to a dedicated AKS node pool where a
-narrowly reviewed runtime seccomp/AppArmor and user-namespace configuration
-can be controlled. Removing the inner network namespace or running the
-compiler directly in a standard ACA container is not an accepted fallback.
+Keep the VM/systemd worker as production and do not deploy the standard ACA
+Consumption worker. Retain the probe-only template for a future platform or
+profile whose namespace policy can be canaried. A viable alternative is a
+dedicated AKS node pool where a narrowly reviewed runtime seccomp/AppArmor and
+user-namespace configuration can be controlled. Removing the inner network
+namespace or running the compiler directly in a standard ACA container is not
+an accepted fallback.
 
 ### Ubuntu 24.04 staging deployment contract
 
