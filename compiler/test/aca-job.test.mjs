@@ -228,6 +228,9 @@ test("ACA packaging defaults to canary and immutable reviewed JRE", async () => 
   assert.match(moduleBicep, /replicaRetryLimit: 0/);
   assert.match(moduleBicep, /parallelism: 1/);
   assert.match(moduleBicep, /identity:\s*\{\s*type: 'None'/);
+  assert.match(moduleBicep,
+    /mountOptions: 'uid=10001,gid=10001,dir_mode=0700,file_mode=0600'/);
+  assert.doesNotMatch(moduleBicep, /mountOptions: '[^']*(?:nosuid|nodev|noexec)/);
   assert.doesNotMatch(moduleBicep, /latest/);
   assert.equal(JSON.parse(registry).roots[0].path,
     "/opt/xmcl/jres/java-runtime-delta-21");
