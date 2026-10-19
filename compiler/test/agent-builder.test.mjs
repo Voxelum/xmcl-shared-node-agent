@@ -230,7 +230,32 @@ test("agent_builder_v1 outer Docker adapter invokes only prlimit and the reviewe
     assert.equal(args.includes("/usr/bin/bwrap"), false);
     assert.equal(args.includes("--unshare-all"), false);
     assert.equal(args[args.indexOf("--") + 1], resolve(jreRoot, "bin", "java"));
-    assert.ok(args.includes("--nproc=256"));
+    const prlimitArgs = [
+      "--as=3221225472", "--fsize=268435456", "--nproc=256", "--cpu=240",
+    ];
+    const jvmResourceArgs = [
+      "-Xms128m", "-Xmx1024m", "-Xss512k",
+      "-XX:MaxMetaspaceSize=512m",
+      "-XX:CompressedClassSpaceSize=256m",
+      "-XX:ReservedCodeCacheSize=128m",
+      "-XX:MaxDirectMemorySize=256m",
+      "-XX:ActiveProcessorCount=2",
+    ];
+    assert.deepEqual(args.slice(0, args.indexOf("--")), prlimitArgs);
+    assert.deepEqual(args.filter((arg) => arg.startsWith("-X")), jvmResourceArgs);
+    // The live boundary probe must exercise the same limits as this actual invocation.
+    const liveSource = await readFile(new URL(
+      "../../internal/docker/builder_live_test.go", import.meta.url,
+    ), "utf8");
+    const probe = liveSource.match(/const builderOuterSandboxLiveProbe = `([^`]+)`/)[1];
+    const invocation = probe.replace(/\\\r?\n/g, " ")
+      .split("\n").find((line) => line.startsWith("prlimit "));
+    assert.ok(invocation, "live probe must invoke prlimit directly");
+    const probeArgs = invocation.trim().split(/\s+/).slice(1);
+    assert.deepEqual(probeArgs, [
+      ...prlimitArgs, "--", "/opt/xmcl/jres/java-runtime-delta-21/bin/java",
+      ...jvmResourceArgs, "-version",
+    ]);
     assert.ok(args.includes("--offline"));
     assert.equal(options.env && Object.keys(options.env).length, 0);
     assert.equal(options.cwd, args.at(-1));

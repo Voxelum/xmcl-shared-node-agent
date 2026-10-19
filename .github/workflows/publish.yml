@@ -39,7 +39,7 @@ jobs:
         run: |
           # This branch is an isolated test publication, never a production/default release.
           test "$GITHUB_REF" = "refs/heads/test/lightnode-20261019-r1"
-          test "$RELEASE_TAG" = "v0.3.22-lightnode.20261019.1"
+          test "$RELEASE_TAG" = "v0.3.22-lightnode.20261019.2"
           [[ "$GITHUB_SHA" =~ ^[a-f0-9]{40}$ ]]
           existing_tags=$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")
           # The publisher creates a new lightweight tag first; never create or replace it here.
@@ -266,6 +266,7 @@ jobs:
         run: |
           image="ghcr.io/voxelum/xmcl-shared-node-builder@$BUILDER_DIGEST"
           docker pull "$image" >/dev/null
+          test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
           test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.xmcl.builder.schema" }}')" = agent_builder_v1
           test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.xmcl.builder.toolchain-catalog-revision" }}')" = "$TOOLCHAIN_REVISION"
           test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.xmcl.builder.runtime-catalog-revision" }}')" = "$RUNTIME_REVISION"

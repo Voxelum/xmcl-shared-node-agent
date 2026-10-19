@@ -207,8 +207,16 @@ if command -v bwrap >/dev/null 2>&1; then
   echo "node-local Builder unexpectedly contains bwrap" >&2
   exit 23
 fi
-prlimit --as=3221225472 --fsize=536870912 --nproc=256 --cpu=240 -- \
-  /opt/xmcl/jres/java-runtime-delta-21/bin/java -version
+# Match the production OuterDockerSandboxAdapter resource profile, not JVM defaults.
+prlimit --as=3221225472 --fsize=268435456 --nproc=256 --cpu=240 -- \
+  /opt/xmcl/jres/java-runtime-delta-21/bin/java \
+  -Xms128m -Xmx1024m -Xss512k \
+  -XX:MaxMetaspaceSize=512m \
+  -XX:CompressedClassSpaceSize=256m \
+  -XX:ReservedCodeCacheSize=128m \
+  -XX:MaxDirectMemorySize=256m \
+  -XX:ActiveProcessorCount=2 \
+  -version
 printf '%s\n' '{"directRestrictedJava":true,"bubblewrap":"absent","capabilities":"none","noNewPrivileges":true,"directMount":false,"nonUserUnshare":false,"setns":false}'
 `
 
