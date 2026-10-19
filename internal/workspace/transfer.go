@@ -18,6 +18,7 @@ import (
 )
 
 var ErrAlreadyExists = errors.New("object already exists")
+var ErrInvalidGrant = errors.New("invalid direct object grant")
 var azureContainerPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$`)
 
 // DirectTransfer follows no redirects and never has access to a control-plane
@@ -138,33 +139,40 @@ func isAlreadyExistsResponse(response *http.Response) bool {
 
 func (t *DirectTransfer) validateGrant(grant controlplane.WorkspaceGrant, key, method string) error {
 	if grant.Key != key || grant.Method != method || grant.URL == "" {
-		return errors.New("grant does not match expected direct object operation")
+		return fmt.Errorf("%w: operation does not match", ErrInvalidGrant)
 	}
 	if expiresAt, err := time.Parse(time.RFC3339, grant.ExpiresAt); err != nil || !expiresAt.After(t.now()) {
-		return errors.New("direct object grant is expired or invalid")
+		return fmt.Errorf("%w: grant is expired", ErrInvalidGrant)
 	}
 	parsed, err := url.Parse(grant.URL)
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil ||
 		!strings.EqualFold(parsed.Host, t.storageHost) {
-		return errors.New("direct object grant has a foreign storage URL")
+		return fmt.Errorf("%w: foreign storage URL", ErrInvalidGrant)
 	}
 	expectedPath := "/" + t.bucket + "/" + key
 	if parsed.Path != expectedPath {
-		return errors.New("direct object grant does not match expected bucket key")
+		return fmt.Errorf("%w: bucket key does not match", ErrInvalidGrant)
 	}
 	if method == http.MethodGet {
 		if len(grant.Headers) != 0 {
-			return errors.New("direct GET grant has unexpected headers")
+			return fmt.Errorf("%w: GET headers are unexpected", ErrInvalidGrant)
 		}
 		return nil
 	}
+	if len(grant.Headers) != 2 {
+		return fmt.Errorf("%w: immutable PUT headers are invalid", ErrInvalidGrant)
+	}
 	headers := make(map[string]string, len(grant.Headers))
 	for name, value := range grant.Headers {
-		headers[strings.ToLower(name)] = value
+		normalized := strings.ToLower(name)
+		if _, duplicate := headers[normalized]; duplicate {
+			return fmt.Errorf("%w: immutable PUT headers are invalid", ErrInvalidGrant)
+		}
+		headers[normalized] = value
 	}
-	if len(headers) != 2 || headers["if-none-match"] != "*" ||
+	if headers["if-none-match"] != "*" ||
 		headers["x-ms-blob-type"] != "BlockBlob" {
-		return errors.New("direct PUT grant is missing immutable Azure Blob headers")
+		return fmt.Errorf("%w: immutable PUT headers are invalid", ErrInvalidGrant)
 	}
 	return nil
 }

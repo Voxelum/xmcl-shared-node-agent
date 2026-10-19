@@ -54,8 +54,14 @@ func (d *Daemon) Process(ctx context.Context, command controlplane.Command) erro
 	}
 	lease := command.Lease
 	var leaseMu sync.RWMutex
-	executionContext, cancel := context.WithCancel(ctx)
+	baseExecutionContext, cancel := context.WithCancel(ctx)
 	defer cancel()
+	leaseSnapshot := func() controlplane.CommandLease {
+		leaseMu.RLock()
+		defer leaseMu.RUnlock()
+		return lease
+	}
+	executionContext := controlplane.WithCommandLeaseSnapshot(baseExecutionContext, leaseSnapshot)
 	var leaseLost atomic.Bool
 	stopRenewal := d.renewLease(executionContext, command.CommandID, &lease, &leaseMu, &leaseLost, cancel)
 	defer stopRenewal()
@@ -73,16 +79,20 @@ func (d *Daemon) Process(ctx context.Context, command controlplane.Command) erro
 		if result.Status != "stopped" {
 			break
 		}
-		leaseMu.RLock()
-		report := controlplane.StoppedReport{
-			ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
-			CommandID: command.CommandID, Lease: lease,
-		}
-		leaseMu.RUnlock()
-		if err := d.retry(ctx, func() error {
-			return d.Reporter.ReportStopped(ctx, report)
+		if err := d.retry(executionContext, func() error {
+			report := controlplane.StoppedReport{
+				ServiceID: command.ServiceID, AssignmentID: command.AssignmentID,
+				CommandID: command.CommandID, Lease: leaseSnapshot(),
+			}
+			return d.Reporter.ReportStopped(executionContext, report)
 		}); err != nil {
+			if leaseLost.Load() {
+				return ErrLeaseLost
+			}
 			return fmt.Errorf("report stopped: %w", err)
+		}
+		if leaseLost.Load() {
+			return ErrLeaseLost
 		}
 		if err := d.Executor.MarkStoppedReported(
 			command.ServiceID,
@@ -99,36 +109,53 @@ func (d *Daemon) Process(ctx context.Context, command controlplane.Command) erro
 			return errors.New("started command is missing its assigned public connection")
 		}
 		endpoint := command.Connection.Endpoint()
-		if err := d.retry(ctx, func() error {
-			return d.Reporter.ReportStarted(ctx, command.ServiceID, command.AssignmentID, endpoint)
+		if err := d.retry(executionContext, func() error {
+			return d.Reporter.ReportStarted(executionContext, command.ServiceID, command.AssignmentID, endpoint)
 		}); err != nil {
+			if leaseLost.Load() {
+				return ErrLeaseLost
+			}
 			return fmt.Errorf("report started: %w", err)
+		}
+		if leaseLost.Load() {
+			return ErrLeaseLost
 		}
 	}
 	if result.Status == "stopped-and-synced" && result.Sync != nil {
-		leaseMu.RLock()
-		result.Sync.CommandID = command.CommandID
-		result.Sync.Lease = lease
-		leaseMu.RUnlock()
-		if err := d.retry(ctx, func() error {
-			return d.Reporter.ReportStoppedAndSynced(ctx, *result.Sync)
+		if err := d.retry(executionContext, func() error {
+			syncResult := *result.Sync
+			syncResult.CommandID = command.CommandID
+			syncResult.Lease = leaseSnapshot()
+			return d.Reporter.ReportStoppedAndSynced(executionContext, syncResult)
 		}); err != nil {
+			if leaseLost.Load() {
+				return ErrLeaseLost
+			}
 			return fmt.Errorf("report stopped and synced: %w", err)
 		}
-		if err := d.Executor.Release(ctx, command); err != nil {
+		if leaseLost.Load() {
+			return ErrLeaseLost
+		}
+		if err := d.Executor.Release(executionContext, command); err != nil {
+			if leaseLost.Load() {
+				return ErrLeaseLost
+			}
 			return fmt.Errorf("release durably synced local workspace: %w", err)
 		}
 	}
 	if leaseLost.Load() {
 		return ErrLeaseLost
 	}
-	leaseMu.RLock()
-	acknowledgementLease := lease
-	leaseMu.RUnlock()
-	if err := d.retry(ctx, func() error {
-		return d.Source.Ack(ctx, command.CommandID, acknowledgementLease, result)
+	if err := d.retry(executionContext, func() error {
+		return d.Source.Ack(executionContext, command.CommandID, leaseSnapshot(), result)
 	}); err != nil {
+		if leaseLost.Load() {
+			return ErrLeaseLost
+		}
 		return fmt.Errorf("ack command: %w", err)
+	}
+	if leaseLost.Load() {
+		return ErrLeaseLost
 	}
 	if err := d.Executor.ClearLease(command.CommandID); err != nil {
 		return fmt.Errorf("clear command lease: %w", err)

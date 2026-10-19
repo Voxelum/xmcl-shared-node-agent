@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"math"
 	"net/http"
@@ -17,6 +18,26 @@ import (
 	"time"
 )
 
+func validHeartbeatStatus() NodeStatus {
+	return NodeStatus{
+		ContractVersion: SharedNodeContractVersion,
+		Status:          "ready",
+		AgentVersion:    "test-agent",
+		Ingress:         Ingress{Host: "node.example"},
+		Platform:        BuildTarget{OS: "linux", Architecture: "amd64"},
+		Runtime: RuntimeImageIdentity{
+			Image:                  "ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:" + strings.Repeat("a", 64),
+			RuntimeCatalogRevision: strings.Repeat("b", 64),
+		},
+		Builder: BuildImageIdentity{
+			Image:                    "ghcr.io/voxelum/xmcl-shared-node-builder@sha256:" + strings.Repeat("c", 64),
+			Schema:                   "agent_builder_v1",
+			ToolchainCatalogRevision: strings.Repeat("d", 64),
+		},
+		AvailableBuildSlots: 1,
+	}
+}
+
 func TestNodeStatusRejectsNonFiniteServiceCPU(t *testing.T) {
 	t.Parallel()
 	for name, cpu := range map[string]float64{
@@ -25,18 +46,48 @@ func TestNodeStatusRejectsNonFiniteServiceCPU(t *testing.T) {
 		"negative": math.Inf(-1),
 	} {
 		t.Run(name, func(t *testing.T) {
-			status := NodeStatus{
-				ContractVersion: SharedNodeContractVersion,
-				Status:          "ready",
-				AgentVersion:    "test-agent",
-				Ingress:         Ingress{Host: "node.example"},
-				Services: []ServiceStatus{{
-					ServiceID: "service-1", AssignmentID: "assignment-1",
-					CPUPercent: cpu, MemoryUsageMiB: 1, MemoryLimitMiB: 2,
-				}},
-			}
+			status := validHeartbeatStatus()
+			status.Services = []ServiceStatus{{
+				ServiceID: "service-1", AssignmentID: "assignment-1",
+				CPUPercent: cpu, MemoryUsageMiB: 1, MemoryLimitMiB: 2,
+			}}
 			if status.Valid() {
 				t.Fatalf("CPU percentage %v was accepted", cpu)
+			}
+		})
+	}
+}
+
+func TestNodeStatusRequiresExactBuildCapabilities(t *testing.T) {
+	tests := map[string]func(*NodeStatus){
+		"platform": func(status *NodeStatus) {
+			status.Platform.Architecture = "arm64"
+		},
+		"runtime image": func(status *NodeStatus) {
+			status.Runtime.Image = "ghcr.io/voxelum/xmcl-shared-minecraft-runtime:latest"
+		},
+		"runtime catalog": func(status *NodeStatus) {
+			status.Runtime.RuntimeCatalogRevision = ""
+		},
+		"builder image": func(status *NodeStatus) {
+			status.Builder.Image = "ghcr.io/voxelum/xmcl-shared-node-builder:latest"
+		},
+		"builder schema": func(status *NodeStatus) {
+			status.Builder.Schema = "compiler_v1"
+		},
+		"builder catalog": func(status *NodeStatus) {
+			status.Builder.ToolchainCatalogRevision = ""
+		},
+		"build slots": func(status *NodeStatus) {
+			status.AvailableBuildSlots = 0
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			status := validHeartbeatStatus()
+			mutate(&status)
+			if status.Valid() {
+				t.Fatal("capability-less or unsupported heartbeat was accepted")
 			}
 		})
 	}
@@ -103,7 +154,7 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 		case "/v1/internal/shared-nodes/register":
 			_, _ = w.Write([]byte(`{"nodeId":"node-1","credential":"node-1.initial-secret","expiresAt":"2026-01-01T00:00:00Z"}`))
 		case "/v1/internal/shared-nodes/node-1/heartbeat":
-			if string(body) != `{"contractVersion":2,"status":"ready","capacity":{"freeWorkspaceGiB":8,"allocatableMemoryMiB":1536,"allocatableSharedCpu":1,"activeContainerCount":1},"agentVersion":"test-agent","ingress":{"host":"public-node.example"}}` {
+			if string(body) != `{"contractVersion":3,"status":"ready","capacity":{"freeWorkspaceGiB":8,"allocatableMemoryMiB":1536,"allocatableSharedCpu":1,"activeContainerCount":1},"agentVersion":"test-agent","ingress":{"host":"public-node.example"},"platform":{"architecture":"amd64","os":"linux"},"runtime":{"image":"ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runtimeCatalogRevision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"builder":{"image":"ghcr.io/voxelum/xmcl-shared-node-builder@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","schema":"agent_builder_v1","toolchainCatalogRevision":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"availableBuildSlots":1}` {
 				t.Fatalf("heartbeat body = %s", body)
 			}
 			_, _ = w.Write([]byte(`{"ok":true}`))
@@ -162,15 +213,12 @@ func TestClientSignsRequestsAndPersistsRotatedCredential(t *testing.T) {
 	if client.bootstrapCredential != "" {
 		t.Fatal("consumed bootstrap credential remained in memory")
 	}
-	if err := client.Heartbeat(ctx, NodeStatus{
-		ContractVersion: SharedNodeContractVersion,
-		Status:          "ready",
-		Capacity: AvailableCapacity{
-			FreeWorkspaceGiB: 8, AllocatableMemoryMiB: 1536, AllocatableSharedCPU: 1, ActiveContainerCount: 1,
-		},
-		AgentVersion: "test-agent",
-		Ingress:      Ingress{Host: "public-node.example"},
-	}); err != nil {
+	status := validHeartbeatStatus()
+	status.Capacity = AvailableCapacity{
+		FreeWorkspaceGiB: 8, AllocatableMemoryMiB: 1536, AllocatableSharedCPU: 1, ActiveContainerCount: 1,
+	}
+	status.Ingress.Host = "public-node.example"
+	if err := client.Heartbeat(ctx, status); err != nil {
 		t.Fatal(err)
 	}
 	command, err := client.Next(ctx, nodeID)
@@ -352,12 +400,7 @@ func TestClientWaitsForInflightRequestsBeforeCredentialRotation(t *testing.T) {
 
 	heartbeatResult := make(chan error, 1)
 	go func() {
-		heartbeatResult <- client.Heartbeat(t.Context(), NodeStatus{
-			ContractVersion: SharedNodeContractVersion,
-			Status:          "ready",
-			AgentVersion:    "test-agent",
-			Ingress:         Ingress{Host: "node.example"},
-		})
+		heartbeatResult <- client.Heartbeat(t.Context(), validHeartbeatStatus())
 	}()
 	<-heartbeatStarted
 	rotationResult := make(chan error, 1)
@@ -419,6 +462,7 @@ func TestClientRequestsLeaseBoundWorkspaceGrant(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s", r.Method)
 		}
+
 		if r.URL.Path != "/v1/internal/shared-nodes/node-1/workspace-grants/restore" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
@@ -462,5 +506,60 @@ func TestClientRequestsLeaseBoundWorkspaceGrant(t *testing.T) {
 	if len(grants.Grants) != 1 || grants.Grants[0].Method != "GET" ||
 		strings.Contains(grants.Grants[0].URL, "accessKey") {
 		t.Fatalf("workspace grants = %#v", grants)
+	}
+}
+
+func TestClientRequestsLeaseBoundV3BuildGrant(t *testing.T) {
+	t.Parallel()
+
+	const buildKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const manifestKey = "shared-runtime/prepared/v1/linux-amd64/" + buildKey + "/manifest.json"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost ||
+			r.URL.Path != "/v1/internal/shared-nodes/node-1/build-grants" ||
+			r.Header.Get("Authorization") != "SharedNode node-1.credential" {
+			t.Fatalf("unexpected build-grant request: %s %s", r.Method, r.URL.Path)
+		}
+		var request BuildGrantRequest
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.ContractVersion != 3 || request.CommandID != "command-1" ||
+			request.AssignmentID != "assignment-1" || request.LeaseToken != "lease-token" ||
+			request.LeaseGeneration != 7 || request.Attempt != 2 ||
+			request.BuildKey != buildKey || request.Stage != "manifest-read" ||
+			len(request.Keys) != 1 || request.Keys[0] != manifestKey ||
+			request.Manifest != nil || request.ManifestSHA256 != "" {
+			t.Fatalf("build grant request = %#v", request)
+		}
+		_, _ = w.Write([]byte(`{"contractVersion":3,"cacheStatus":"miss","grants":[]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientOptions{
+		BaseURL: server.URL, NodeID: "node-1", Region: "tpe",
+		BootstrapCredential: "bootstrap",
+		CredentialPath:      filepath.Join(t.TempDir(), "credential"),
+		HTTPClient:          server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.setCredential("node-1.credential"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.BuildGrants(t.Context(), Command{
+		CommandID: "command-1", AssignmentID: "assignment-1", Attempt: 2,
+		Lease: CommandLease{Token: "lease-token", Generation: 7},
+	}, BuildGrantRequest{
+		BuildKey: buildKey, Stage: "manifest-read", Keys: []string{manifestKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.CacheStatus != "miss" || len(response.Grants) != 0 {
+		t.Fatalf("build grant response = %#v", response)
 	}
 }

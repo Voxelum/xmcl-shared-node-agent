@@ -23,7 +23,7 @@ export async function validateBundle(archive, frozenManifest) {
   if (!(archive instanceof Uint8Array) || archive.byteLength > MAX_BUNDLE_BYTES) {
     throw new CompilerFailure("bundle_too_large");
   }
-  const entries = readZip(archive);
+  const entries = readStrictZip(archive);
   const manifestEntry = entries.get("bundle.json");
   if (!manifestEntry || entries.size > MAX_BUNDLE_ENTRIES) {
     throw new CompilerFailure("invalid_bundle");
@@ -269,7 +269,10 @@ function artifactIntent(path) {
   return "data";
 }
 
-function readZip(archive) {
+export function readStrictZip(archive) {
+  if (!(archive instanceof Uint8Array) || archive.byteLength > MAX_BUNDLE_BYTES) {
+    throw new CompilerFailure("invalid_bundle");
+  }
   if (archive.byteLength < 22) throw new CompilerFailure("invalid_bundle");
   const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
   let eocd = -1;
@@ -285,10 +288,14 @@ function readZip(archive) {
   const count = u16(view, eocd + 10);
   const centralSize = u32(view, eocd + 12);
   const centralOffset = u32(view, eocd + 16);
-  if (count > MAX_BUNDLE_ENTRIES || centralOffset + centralSize > eocd) {
+  const commentLength = u16(view, eocd + 20);
+  if (u16(view, eocd + 8) !== count || eocd + 22 + commentLength !== archive.byteLength ||
+    count > MAX_BUNDLE_ENTRIES || centralOffset + centralSize !== eocd) {
     throw new CompilerFailure("invalid_bundle");
   }
   const entries = new Map();
+  const pathKeys = new Set();
+  const ranges = [];
   let cursor = centralOffset;
   let logicalBytes = 0;
   for (let index = 0; index < count; index += 1) {
@@ -303,11 +310,15 @@ function readZip(archive) {
     const nameLength = u16(view, cursor + 28);
     const extraLength = u16(view, cursor + 30);
     const commentLength = u16(view, cursor + 32);
+    const diskStart = u16(view, cursor + 34);
+    const externalAttributes = u32(view, cursor + 38);
     const localOffset = u32(view, cursor + 42);
     const end = cursor + 46 + nameLength + extraLength + commentLength;
     logicalBytes += size;
     if (
-      end > archive.byteLength || (flags & 1) || (method !== 0 && method !== 8) ||
+      end > archive.byteLength || (flags & ~0x80e) !== 0 ||
+      (method !== 8 && (flags & 0x6) !== 0) || diskStart !== 0 ||
+      (method !== 0 && method !== 8) ||
       size > MAX_ENTRY_BYTES || logicalBytes > MAX_BUNDLE_LOGICAL_BYTES ||
       (size > 0 && (compressedSize === 0 || size / compressedSize > 100))
     ) {
@@ -319,27 +330,92 @@ function readZip(archive) {
     } catch {
       throw new CompilerFailure("invalid_bundle");
     }
-    if (!safeZipPath(path) || entries.has(path) || localOffset + 30 > centralOffset ||
+    const directory = path.endsWith("/");
+    const pathKey = (directory ? path.slice(0, -1) : path)
+      .normalize("NFKC")
+      .toLowerCase();
+    const centralExtra = archive.subarray(
+      cursor + 46 + nameLength,
+      cursor + 46 + nameLength + extraLength,
+    );
+    if (!safeZipPath(path, directory) || pathKeys.has(pathKey) ||
+      !safeEntryAttributes(externalAttributes, directory) ||
+      !validExtraFields(centralExtra) ||
+      (directory && (size !== 0 || expectedCrc !== 0 ||
+        (method === 0 && compressedSize !== 0))) ||
+      localOffset + 30 > centralOffset ||
       u32(view, localOffset) !== 0x04034b50) {
       throw new CompilerFailure("invalid_bundle");
     }
+    pathKeys.add(pathKey);
+    const localFlags = u16(view, localOffset + 6);
+    const localMethod = u16(view, localOffset + 8);
+    const localCrc = u32(view, localOffset + 14);
+    const localCompressedSize = u32(view, localOffset + 18);
+    const localSize = u32(view, localOffset + 22);
     const localNameLength = u16(view, localOffset + 26);
     const localExtraLength = u16(view, localOffset + 28);
     const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
-    if (dataOffset + compressedSize > centralOffset) throw new CompilerFailure("invalid_bundle");
+    const localName = archive.subarray(localOffset + 30, localOffset + 30 + localNameLength);
+    const localExtra = archive.subarray(
+      localOffset + 30 + localNameLength,
+      dataOffset,
+    );
+    const centralName = archive.subarray(cursor + 46, cursor + 46 + nameLength);
+    const dataEnd = dataOffset + compressedSize;
+    const descriptor = (flags & 0x8) !== 0;
+    const localIdentityMatches = descriptor
+      ? (localCrc === 0 && localCompressedSize === 0 && localSize === 0) ||
+        (localCrc === expectedCrc && localCompressedSize === compressedSize &&
+          localSize === size)
+      : localCrc === expectedCrc && localCompressedSize === compressedSize &&
+        localSize === size;
+    if (localFlags !== flags || localMethod !== method || !localIdentityMatches ||
+      localNameLength !== nameLength || !equalBytes(localName, centralName) ||
+      !validExtraFields(localExtra) || dataEnd > centralOffset) {
+      throw new CompilerFailure("invalid_bundle");
+    }
+    const rangeEnd = descriptor
+      ? dataDescriptorEnd(
+        view,
+        dataEnd,
+        centralOffset,
+        expectedCrc,
+        compressedSize,
+        size,
+      )
+      : dataEnd;
+    if (ranges.some(([start, finish]) => localOffset < finish && rangeEnd > start)) {
+      throw new CompilerFailure("invalid_bundle");
+    }
+    ranges.push([localOffset, rangeEnd]);
     const compressed = archive.subarray(dataOffset, dataOffset + compressedSize);
     let bytes;
     try {
-      bytes = method === 0 ? compressed.slice() : inflateRawSync(compressed);
+      bytes = method === 0
+        ? compressed.slice()
+        : inflateRawSync(compressed, { maxOutputLength: size + 1 });
     } catch {
       throw new CompilerFailure("invalid_bundle");
     }
     if (bytes.byteLength !== size || crc32(bytes) !== expectedCrc) throw new CompilerFailure("invalid_bundle");
-    entries.set(path, { bytes });
+    if (!directory) entries.set(path, { bytes });
     cursor = end;
   }
-  if (cursor !== centralOffset + centralSize) throw new CompilerFailure("invalid_bundle");
+  ranges.sort((left, right) => left[0] - right[0]);
+  let localCursor = 0;
+  for (const [start, end] of ranges) {
+    if (start !== localCursor) throw new CompilerFailure("invalid_bundle");
+    localCursor = end;
+  }
+  if (cursor !== centralOffset + centralSize || localCursor !== centralOffset) {
+    throw new CompilerFailure("invalid_bundle");
+  }
   return entries;
+}
+
+export function safeArchivePath(path) {
+  return safeZipPath(path);
 }
 
 function allowedPath(path) {
@@ -356,10 +432,53 @@ function allowedPath(path) {
     ].some((prefix) => path.startsWith(prefix));
 }
 
-function safeZipPath(path) {
+function safeZipPath(path, allowDirectory = false) {
+  const candidate = allowDirectory && path.endsWith("/") ? path.slice(0, -1) : path;
   return typeof path === "string" && path.length > 0 && path.length <= 1024 &&
     !path.includes("\\") && !path.startsWith("/") && !/^[A-Za-z]:/.test(path) &&
-    path.split("/").every((part) => part && part !== "." && part !== "..");
+    !path.includes("\0") && candidate.length > 0 &&
+    candidate.split("/").every((part) => part && part !== "." && part !== "..");
+}
+
+function safeEntryAttributes(attributes, directory) {
+  const dos = attributes & 0xff;
+  const unixType = (attributes >>> 16) & 0xf000;
+  const unixDirectory = unixType === 0x4000;
+  const unixRegular = unixType === 0x8000;
+  if (unixType !== 0 && !unixDirectory && !unixRegular) return false;
+  if ((dos & 0x08) !== 0) return false;
+  const attributedDirectory = unixDirectory || (dos & 0x10) !== 0;
+  return directory
+    ? !unixRegular
+    : !attributedDirectory;
+}
+
+function validExtraFields(bytes) {
+  let cursor = 0;
+  while (cursor < bytes.byteLength) {
+    if (cursor + 4 > bytes.byteLength) return false;
+    const length = bytes[cursor + 2] | (bytes[cursor + 3] << 8);
+    cursor += 4 + length;
+    if (cursor > bytes.byteLength) return false;
+  }
+  return true;
+}
+
+function dataDescriptorEnd(view, offset, limit, crc, compressedSize, size) {
+  if (offset + 12 <= limit &&
+    u32(view, offset) === crc &&
+    u32(view, offset + 4) === compressedSize &&
+    u32(view, offset + 8) === size) {
+    return offset + 12;
+  }
+  if (offset + 16 <= limit &&
+    u32(view, offset) === 0x08074b50 &&
+    u32(view, offset + 4) === crc &&
+    u32(view, offset + 8) === compressedSize &&
+    u32(view, offset + 12) === size) {
+    return offset + 16;
+  }
+  throw new CompilerFailure("invalid_bundle");
 }
 
 function validSha256(value) {
@@ -412,4 +531,9 @@ function crc32(bytes) {
 
 function comparePath(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function equalBytes(left, right) {
+  return left.byteLength === right.byteLength &&
+    left.every((byte, index) => byte === right[index]);
 }

@@ -1,0 +1,5 @@
+{
+  "domain": "xmcl-prepared-content-build-key-v1\n",
+  "canonicalJson": "{\"builder\":{\"image\":\"ghcr.io/voxelum/xmcl-shared-node-builder@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"schema\":\"agent_builder_v1\",\"toolchainCatalogRevision\":\"3333333333333333333333333333333333333333333333333333333333333333\"},\"compatibility\":{\"java\":{\"component\":\"java-runtime-delta\",\"major\":21},\"loader\":{\"kind\":\"fabric\",\"version\":\"0.16.10\"},\"minecraftVersion\":\"1.21.1\"},\"dependencies\":[],\"files\":[],\"runtime\":{\"image\":\"ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:2222222222222222222222222222222222222222222222222222222222222222\",\"runtimeCatalogRevision\":\"4444444444444444444444444444444444444444444444444444444444444444\"},\"schemaVersion\":1,\"source\":{\"format\":\"zip\",\"sha256\":\"8739c76e681f900923b900c9df0ef75cf421d39cabb54650c4b9ad19b6a76d85\"},\"target\":{\"architecture\":\"amd64\",\"os\":\"linux\"}}",
+  "buildKey": "e8c5bc3bc8523e584b18e14e3d3ca18af22c71e90ddeb15293f9d59992e9a9a9"
+}

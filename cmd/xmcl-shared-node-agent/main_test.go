@@ -53,9 +53,30 @@ func TestWriteReadyMarkerPublishesConfirmedNode(t *testing.T) {
 	}
 }
 
+func TestWriteEnrollmentRejectedMarkerPublishesSafeStatus(t *testing.T) {
+	root := t.TempDir()
+	if err := writeEnrollmentRejectedMarker(root, "node_1"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "bootstrap-enrollment-rejected"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var marker map[string]string
+	if err := json.Unmarshal(data, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker["nodeId"] != "node_1" || marker["status"] != "enrollment-rejected" {
+		t.Fatalf("marker = %#v", marker)
+	}
+}
+
 func TestDeriveNodeStatusSubtractsManagedCapacity(t *testing.T) {
 	status := deriveNodeStatus(context.Background(), config.Config{
 		TotalMemoryMiB: 4096, TotalSharedCPU: 8, TotalWorkspaceGiB: 100, IngressHost: "198.51.100.10",
+		ContainerImage:         "ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:" + strings.Repeat("a", 64),
+		BuilderImage:           "ghcr.io/voxelum/xmcl-shared-node-builder@sha256:" + strings.Repeat("b", 64),
+		BuilderCatalogRevision: strings.Repeat("c", 64),
 	}, func(context.Context) ([]agent.RunningService, error) {
 		return []agent.RunningService{{
 			ServiceID: "service-1", AssignmentID: "assignment-1",
@@ -82,7 +103,12 @@ func TestDeriveNodeStatusSubtractsManagedCapacity(t *testing.T) {
 }
 
 func TestDeriveNodeStatusDrainsWhenRuntimeCannotReportCapacity(t *testing.T) {
-	status := deriveNodeStatus(context.Background(), config.Config{IngressHost: "public-node.example"},
+	status := deriveNodeStatus(context.Background(), config.Config{
+		IngressHost:            "public-node.example",
+		ContainerImage:         "ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:" + strings.Repeat("a", 64),
+		BuilderImage:           "ghcr.io/voxelum/xmcl-shared-node-builder@sha256:" + strings.Repeat("b", 64),
+		BuilderCatalogRevision: strings.Repeat("c", 64),
+	},
 		func(context.Context) ([]agent.RunningService, error) {
 			return nil, errors.New("Docker unavailable")
 		}, "test-agent")

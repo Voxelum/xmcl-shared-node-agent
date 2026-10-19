@@ -26,6 +26,9 @@ type Config struct {
 	WorkspaceRoot          string
 	StateRoot              string
 	ContainerImage         string
+	BuilderImage           string
+	BuilderCatalogRevision string
+	BuilderRoot            string
 	RCONStopTimeout        time.Duration
 	TotalMemoryMiB         int64
 	TotalSharedCPU         int64
@@ -40,6 +43,7 @@ type Config struct {
 var ingressHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
 var sharedNodeRegionPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
 var runtimeImagePattern = regexp.MustCompile(`^ghcr\.io/voxelum/xmcl-shared-minecraft-runtime@sha256:[a-f0-9]{64}$`)
+var builderImagePattern = regexp.MustCompile(`^ghcr\.io/voxelum/xmcl-shared-node-builder@sha256:[a-f0-9]{64}$`)
 var azureContainerPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$`)
 
 func Load() (Config, error) {
@@ -78,6 +82,9 @@ func Load() (Config, error) {
 		{"XMCL_WORKSPACE_ROOT", &c.WorkspaceRoot},
 		{"XMCL_STATE_ROOT", &c.StateRoot},
 		{"XMCL_CONTAINER_IMAGE", &c.ContainerImage},
+		{"XMCL_BUILDER_IMAGE", &c.BuilderImage},
+		{"XMCL_BUILDER_TOOLCHAIN_CATALOG_REVISION", &c.BuilderCatalogRevision},
+		{"XMCL_BUILDER_ROOT", &c.BuilderRoot},
 		{"XMCL_QUOTA_MOUNT_PATH", &c.QuotaMountPath},
 		{"XMCL_METRICS_ADDR", &c.MetricsAddr},
 	} {
@@ -93,6 +100,12 @@ func Load() (Config, error) {
 	}
 	if !runtimeImagePattern.MatchString(c.ContainerImage) {
 		return Config{}, fmt.Errorf("XMCL_CONTAINER_IMAGE must be an immutable XMCL shared Minecraft runtime digest")
+	}
+	if !builderImagePattern.MatchString(c.BuilderImage) {
+		return Config{}, fmt.Errorf("XMCL_BUILDER_IMAGE must be an immutable XMCL shared node builder digest")
+	}
+	if !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(c.BuilderCatalogRevision) {
+		return Config{}, fmt.Errorf("XMCL_BUILDER_TOOLCHAIN_CATALOG_REVISION must be a lowercase SHA-256")
 	}
 	for _, name := range []string{
 		"AZURE_STORAGE_ACCOUNT",
@@ -121,6 +134,10 @@ func Load() (Config, error) {
 	c.StateRoot, err = filepath.Abs(c.StateRoot)
 	if err != nil {
 		return Config{}, fmt.Errorf("resolve state root: %w", err)
+	}
+	c.BuilderRoot, err = filepath.Abs(c.BuilderRoot)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolve builder root: %w", err)
 	}
 	c.ControlPlaneCredential = os.Getenv("XMCL_CONTROL_PLANE_CREDENTIAL")
 	if c.ControlPlaneCredential == "" {

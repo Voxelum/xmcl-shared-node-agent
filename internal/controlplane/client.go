@@ -274,20 +274,52 @@ func (c *Client) Ack(ctx context.Context, commandID string, lease CommandLease, 
 		return errors.New("cannot acknowledge a command without a result status")
 	}
 	body, err := json.Marshal(struct {
-		Token      string `json:"leaseToken"`
-		Generation int64  `json:"leaseGeneration"`
-		Status     string `json:"status"`
-		Code       string `json:"code,omitempty"`
-		Message    string `json:"message,omitempty"`
+		Token      string                 `json:"leaseToken"`
+		Generation int64                  `json:"leaseGeneration"`
+		Status     string                 `json:"status"`
+		Code       string                 `json:"code,omitempty"`
+		Message    string                 `json:"message,omitempty"`
+		Prepared   *PreparedContentResult `json:"prepared,omitempty"`
 	}{
 		Token: lease.Token, Generation: lease.Generation,
 		Status: result.Status, Code: result.Code, Message: result.Message,
+		Prepared: result.Prepared,
 	})
 	if err != nil {
 		return fmt.Errorf("encode acknowledgement: %w", err)
 	}
+
 	_, err = c.sendNode(ctx, "/v1/internal/shared-nodes/"+c.nodeID+"/commands/"+commandID+"/ack", body)
 	return err
+}
+
+func (c *Client) BuildGrants(ctx context.Context, command Command, request BuildGrantRequest) (BuildGrantResponse, error) {
+	if command.CommandID == "" || command.AssignmentID == "" ||
+		command.Lease.Token == "" || command.Lease.Generation < 1 {
+		return BuildGrantResponse{}, errors.New("build grant requires a currently leased command")
+	}
+	request.ContractVersion = BuildGrantContractVersion
+	request.CommandID = command.CommandID
+	request.AssignmentID = command.AssignmentID
+	request.LeaseToken = command.Lease.Token
+	request.LeaseGeneration = command.Lease.Generation
+	request.Attempt = command.Attempt
+	body, err := json.Marshal(request)
+	if err != nil {
+		return BuildGrantResponse{}, fmt.Errorf("encode build grant request: %w", err)
+	}
+	response, err := c.sendNode(ctx, "/v1/internal/shared-nodes/"+c.nodeID+"/build-grants", body)
+	if err != nil {
+		return BuildGrantResponse{}, err
+	}
+	var grants BuildGrantResponse
+	if err := decodeStrictJSON(response, &grants); err != nil {
+		return BuildGrantResponse{}, fmt.Errorf("decode build grant response: %w", err)
+	}
+	if grants.ContractVersion != BuildGrantContractVersion {
+		return BuildGrantResponse{}, errors.New("build grant response has an unsupported contract version")
+	}
+	return grants, nil
 }
 
 func (c *Client) ReportStarted(ctx context.Context, serviceID, assignmentID string, endpoint Endpoint) error {

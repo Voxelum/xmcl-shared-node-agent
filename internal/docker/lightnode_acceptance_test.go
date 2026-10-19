@@ -258,7 +258,7 @@ func TestMockLightNodeDockerLifecycle(t *testing.T) {
 
 	store := newMemoryObjectStore()
 	content, paths, logicalSize := compilerContent(t)
-	contentKey := "shared-hosting/acceptance-account/acceptance-service/compiler-content/content.tar.zst"
+	contentKey := "shared-runtime/prepared/v1/linux-amd64/" + strings.Repeat("b", 64) + "/content.tar.zst"
 	store.objects[contentKey] = content
 	contentSHA := digest(content)
 
@@ -296,6 +296,15 @@ func TestMockLightNodeDockerLifecycle(t *testing.T) {
 				Status:          "ready",
 				AgentVersion:    "mock-lightnode",
 				Ingress:         controlplane.Ingress{Host: "mock-lightnode.local"},
+				Platform:        controlplane.BuildTarget{OS: "linux", Architecture: "amd64"},
+				Runtime: controlplane.RuntimeImageIdentity{
+					Image: acceptanceImageIdentity, RuntimeCatalogRevision: runtimecontract.CatalogSHA256(),
+				},
+				Builder: controlplane.BuildImageIdentity{
+					Image:  "ghcr.io/voxelum/xmcl-shared-node-builder@sha256:" + strings.Repeat("c", 64),
+					Schema: "agent_builder_v1", ToolchainCatalogRevision: strings.Repeat("d", 64),
+				},
+				AvailableBuildSlots: 1,
 			}
 		},
 	}

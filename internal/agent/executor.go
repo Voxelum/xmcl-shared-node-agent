@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/voxelum/xmcl-shared-node-agent/internal/builder"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
 )
 
@@ -31,6 +32,10 @@ func (e *Executor) Release(ctx context.Context, command controlplane.Command) er
 type ContainerRuntime interface {
 	Start(ctx context.Context, command controlplane.Command, workspacePath string) error
 	Stop(ctx context.Context, command controlplane.Command) error
+}
+
+type ContentPreparer interface {
+	Prepare(context.Context, controlplane.Command) (controlplane.PreparedContentResult, error)
 }
 
 // OrphanReconciler removes only a managed container whose labels were already
@@ -83,8 +88,13 @@ type Executor struct {
 	store     StateStore
 	workspace Workspace
 	runtime   ContainerRuntime
+	preparer  ContentPreparer
 	locks     sync.Map
 	locker    ServiceLocker
+}
+
+func (e *Executor) SetContentPreparer(preparer ContentPreparer) {
+	e.preparer = preparer
 }
 
 func NewExecutor(nodeID string, store StateStore, workspace Workspace, runtime ContainerRuntime, lockers ...ServiceLocker) *Executor {
@@ -203,6 +213,27 @@ func (e *Executor) execute(ctx context.Context, command controlplane.Command) (c
 		return controlplane.CommandResult{}, nil, err
 	}
 	switch command.Kind {
+	case controlplane.ContentPrepare:
+		if e.preparer == nil {
+			return controlplane.CommandResult{
+				Status: "failed", Code: "builder_identity_mismatch",
+				Message: "node content builder is unavailable",
+			}, activePointer(active, exists), nil
+		}
+		prepared, err := e.preparer.Prepare(ctx, command)
+		if err != nil {
+			var failure *builder.Failure
+			if errors.As(err, &failure) {
+				if failure.Class == "lease-lost" {
+					return controlplane.CommandResult{}, activePointer(active, exists), err
+				}
+				return controlplane.CommandResult{
+					Status: "failed", Code: failure.Code, Message: failure.Error(),
+				}, activePointer(active, exists), nil
+			}
+			return controlplane.CommandResult{}, activePointer(active, exists), retryable(err)
+		}
+		return controlplane.CommandResult{Status: "prepared", Prepared: &prepared}, activePointer(active, exists), nil
 	case controlplane.RestoreAndStart:
 		if command.Connection == nil || !command.Connection.Valid() {
 			return failed("restore command requires a control-plane assigned public connection"), activePointer(active, exists), nil

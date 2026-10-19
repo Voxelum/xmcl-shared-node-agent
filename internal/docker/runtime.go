@@ -115,6 +115,9 @@ func (r *Runtime) Running(ctx context.Context) ([]agent.RunningService, error) {
 		if summary.State != "running" {
 			continue
 		}
+		if workload := summary.Labels["xmcl.workload"]; workload != "" && workload != "runtime" {
+			continue
+		}
 		serviceID, assignmentID := summary.Labels["xmcl.service-id"], summary.Labels["xmcl.assignment-id"]
 		if serviceID == "" || assignmentID == "" {
 			return nil, fmt.Errorf("managed container %q is missing ownership labels", summary.ID)
@@ -359,6 +362,7 @@ func BuildCreateRequest(command controlplane.Command, workspacePath, image strin
 			"xmcl.service-id":      command.ServiceID,
 			"xmcl.assignment-id":   command.AssignmentID,
 			"xmcl.managed":         "true",
+			"xmcl.workload":        "runtime",
 			resourceMemoryLabel:    strconv.FormatInt(command.Resources.MemoryMiB, 10),
 			resourceSharedCPULabel: strconv.FormatInt(command.Resources.SharedCPU, 10),
 			resourceBurstCPULabel:  strconv.FormatInt(command.Resources.BurstCPU, 10),

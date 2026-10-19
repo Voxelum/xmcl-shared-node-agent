@@ -196,7 +196,7 @@ async function readOnlyMount(path) {
     const separator = fields.indexOf("-");
     if (separator < 6) continue;
     const mountPoint = unescapeMount(fields[4]);
-    if ((path === mountPoint || path.startsWith(`${mountPoint}/`)) &&
+    if ((path === mountPoint || path.startsWith(mountPoint === "/" ? "/" : `${mountPoint}/`)) &&
       (!selected || mountPoint.length > selected.mountPoint.length)) {
       selected = { mountPoint, options: fields[5].split(",") };
     }

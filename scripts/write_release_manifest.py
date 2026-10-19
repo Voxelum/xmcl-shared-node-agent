@@ -28,11 +28,15 @@ def main() -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--image-digest", required=True)
+    parser.add_argument("--builder-image-digest", required=True)
     parser.add_argument("--catalog", type=Path, required=True)
+    parser.add_argument("--toolchain-catalog", type=Path, required=True)
     parser.add_argument("--agent", type=Path, required=True)
     parser.add_argument("--quota-helper", type=Path, required=True)
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--agent-version-evidence", type=Path, required=True,
+                        help="reviewed same-build observed version receipt, never inferred from commit")
     args = parser.parse_args()
 
     if not COMMIT.fullmatch(args.commit):
@@ -41,9 +45,28 @@ def main() -> int:
         raise ValueError("release tag is invalid")
     if not SHA256.fullmatch(args.image_digest):
         raise ValueError("runtime image digest is invalid")
+    if not SHA256.fullmatch(args.builder_image_digest):
+        raise ValueError("builder image digest is invalid")
     catalog_sha256 = hashlib.sha256(args.catalog.read_bytes()).hexdigest()
+    toolchain_catalog = json.loads(args.toolchain_catalog.read_text(encoding="utf-8"))
+    toolchain_revision = toolchain_catalog.get("catalogRevision")
+    toolchain_runtime_revision = toolchain_catalog.get("runtimeCatalogRevision")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(toolchain_revision)):
+        raise ValueError("toolchain catalog revision is invalid")
+    if toolchain_runtime_revision != catalog_sha256:
+        raise ValueError("toolchain and runtime catalogs are not bound to the same revision")
+    evidence = json.loads(args.agent_version_evidence.read_text(encoding="utf-8"))
+    agent_record = file_record(args.agent)
+    if (not isinstance(evidence, dict) or
+        set(evidence) != {"schema", "gitCommit", "observedAgentVersion", "agentSha256"} or
+        evidence["schema"] != "xmcl-observed-agent-version-v1" or
+        evidence["gitCommit"] != args.commit or
+        evidence["observedAgentVersion"] != args.commit or
+        evidence["agentSha256"] != agent_record["sha256"]):
+        raise ValueError("observed agent version receipt does not bind this commit and binary")
+    agent_record["version"] = evidence["observedAgentVersion"]
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "gitCommit": args.commit,
         "tag": args.tag,
         "runtimeCatalogSha256": catalog_sha256,
@@ -51,8 +74,16 @@ def main() -> int:
             "name": "ghcr.io/voxelum/xmcl-shared-minecraft-runtime",
             "digest": args.image_digest,
         },
+        "builderImage": {
+            "name": "ghcr.io/voxelum/xmcl-shared-node-builder",
+            "digest": args.builder_image_digest,
+            "schema": "agent_builder_v1",
+            "toolchainCatalogRevision": toolchain_revision,
+            "runtimeCatalogRevision": catalog_sha256,
+            "target": "linux-amd64",
+        },
         "artifacts": {
-            "nodeAgent": file_record(args.agent),
+            "nodeAgent": agent_record,
             "quotaHelper": file_record(args.quota_helper),
             "runtimeEntrypoint": file_record(args.runtime),
         },

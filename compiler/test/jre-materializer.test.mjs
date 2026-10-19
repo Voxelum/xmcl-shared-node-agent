@@ -100,6 +100,7 @@ test("materializes and re-verifies the exact catalog-bound Java 21 root", async 
   const runtimePath = join(root, "runtime-catalog.json");
   const catalogPath = join(root, "toolchain-catalog.json");
   const outputRoot = join(root, "jres", jre.id);
+  const registryPath = join(root, "jre-registry.json");
   await writeFile(runtimePath, runtimeBytes);
   await writeFile(catalogPath, JSON.stringify(catalog));
 
@@ -107,6 +108,8 @@ test("materializes and re-verifies the exact catalog-bound Java 21 root", async 
     runtimeCatalogPath: runtimePath,
     toolchainCatalogPath: catalogPath,
     outputRoot,
+    registryOutput: registryPath,
+    registryRoot: outputRoot,
     fetchImpl: async (url, options) => {
       assert.equal(url, resolution.files[1].url);
       assert.equal(options.redirect, "error");
@@ -127,12 +130,7 @@ test("materializes and re-verifies the exact catalog-bound Java 21 root", async 
     supportedFamilies: ["neoforge"],
   });
   const registry = new VerifiedReadOnlyJreRegistry({
-    document: {
-      schemaVersion: 1,
-      catalogRevision: reviewed.catalogRevision,
-      runtimeCatalogRevision: reviewed.runtimeCatalogRevision,
-      roots: [{ ...jre, path: outputRoot }],
-    },
+    document: JSON.parse(await readFile(registryPath, "utf8")),
     catalog: reviewed,
     rootDirectory: join(root, "jres"),
     mountInspector: async () => true,
@@ -141,6 +139,21 @@ test("materializes and re-verifies the exact catalog-bound Java 21 root", async 
   const verified = await registry.resolve(jre);
   assert.equal(verified.verified, true);
   assert.equal(verified.readOnly, true);
+});
+
+test("production locks select one identical JRE used by multiple toolchains", async () => {
+  const productionRoot = join(root, "production-selection");
+  const outputRoot = join(productionRoot, "jre");
+  await rm(productionRoot, { recursive: true, force: true });
+  await mkdir(productionRoot, { recursive: true });
+  await assert.rejects(() => materializeVerifiedJre({
+    runtimeCatalogPath: resolve("../runtime-image/runtime-catalog.lock.json"),
+    toolchainCatalogPath: resolve("toolchain-catalog.lock.json"),
+    outputRoot,
+    fetchImpl: async () => {
+      throw new Error("network deliberately disabled");
+    },
+  }), (error) => error?.code === "jre_download_failed");
 });
 
 function sha1(bytes) {

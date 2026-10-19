@@ -194,7 +194,7 @@ export class BubblewrapSandboxAdapter {
   }
 }
 
-function selectNeoForgeArtifacts(request) {
+export function selectNeoForgeArtifacts(request) {
   const installerCoordinate =
     `net.neoforged:neoforge:${request.plan.loader.version}:installer`;
   const serverCoordinate =
@@ -207,7 +207,7 @@ function selectNeoForgeArtifacts(request) {
   return { installer, server };
 }
 
-function mavenPath(artifact) {
+export function mavenPath(artifact) {
   if (typeof artifact?.url !== "string" || typeof artifact.coordinate !== "string") {
     throw new CompilerFailure("installer_failed");
   }
@@ -348,7 +348,7 @@ export function rewriteNeoForgeInstaller(bytes) {
   function readU32(bytes, offset) {
     return (readU16(bytes, offset) | (readU16(bytes, offset + 2) << 16)) >>> 0;
   }
-function validateRequest(value) {
+export function validateRequest(value) {
   if (!value || value.schemaVersion !== 1 || !value.plan || !value.jre ||
     !Array.isArray(value.artifacts) || value.sandbox?.ephemeralWorkspace !== true ||
     value.sandbox?.nonRoot !== true || value.sandbox?.readOnlyBaseFilesystem !== true ||
@@ -358,7 +358,7 @@ function validateRequest(value) {
   }
 }
 
-async function collectFiles(root) {
+export async function collectFiles(root) {
   const files = new Map();
   let total = 0;
   const visit = async (directory, prefix = "") => {
@@ -388,7 +388,7 @@ async function collectFiles(root) {
   return files;
 }
 
-async function runProcess(command, args, { timeoutMs, cwd, env }) {
+export async function runProcess(command, args, { timeoutMs, cwd, env }) {
   await new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd,

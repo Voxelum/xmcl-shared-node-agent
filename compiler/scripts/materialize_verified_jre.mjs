@@ -25,11 +25,15 @@ export async function materializeVerifiedJre({
   runtimeCatalogPath,
   toolchainCatalogPath,
   outputRoot,
+  registryOutput,
+  registryRoot,
   jreId = "java-runtime-delta-21",
   fetchImpl = fetch,
 } = {}) {
   if (!absolutePath(runtimeCatalogPath) || !absolutePath(toolchainCatalogPath) ||
     !absolutePath(outputRoot) || jreId !== "java-runtime-delta-21" ||
+    (registryOutput !== undefined || registryRoot !== undefined) &&
+      (!absolutePath(registryOutput) || !absolutePath(registryRoot)) ||
     typeof fetchImpl !== "function") {
     throw new MaterializerFailure("invalid_arguments");
   }
@@ -46,7 +50,11 @@ export async function materializeVerifiedJre({
     throw new MaterializerFailure("runtime_catalog_mismatch");
   }
   const toolchains = catalog.toolchains.filter((toolchain) => toolchain.jre.id === jreId);
-  if (toolchains.length !== 1) throw new MaterializerFailure("jre_not_supported");
+  if (toolchains.length < 1 ||
+    toolchains.some((toolchain) =>
+      !sameJreDefinition(toolchain.jre, toolchains[0].jre))) {
+    throw new MaterializerFailure("jre_not_supported");
+  }
   const expected = toolchains[0].jre;
   const resolutions = runtime.resolutions.filter((resolution) =>
     resolution?.component === expected.component && resolution?.major === expected.major);
@@ -92,6 +100,23 @@ export async function materializeVerifiedJre({
     }
     await chmod(staging, 0o755);
     await rename(staging, outputRoot);
+    if (registryOutput !== undefined) {
+      await assertMissing(registryOutput);
+      await mkdir(dirname(registryOutput), { recursive: true, mode: 0o755 });
+      await writeFile(registryOutput, `${JSON.stringify({
+        schemaVersion: 1,
+        catalogRevision: catalog.catalogRevision,
+        runtimeCatalogRevision: catalog.runtimeCatalogRevision,
+        roots: [{
+          id: expected.id,
+          sha256: expected.sha256,
+          component: expected.component,
+          major: expected.major,
+          runtimeCatalogRevision: expected.runtimeCatalogRevision,
+          path: registryRoot,
+        }],
+      }, null, 2)}\n`, { flag: "wx", mode: 0o644 });
+    }
     return {
       id: expected.id,
       component: expected.component,
@@ -302,6 +327,14 @@ function sameKeys(value, expected) {
     actual.every((key, index) => key === keys[index]);
 }
 
+function sameJreDefinition(left, right) {
+  return left?.id === right?.id &&
+    left.sha256 === right.sha256 &&
+    left.component === right.component &&
+    left.major === right.major &&
+    left.runtimeCatalogRevision === right.runtimeCatalogRevision;
+}
+
 function parseArguments(arguments_) {
   const values = {};
   for (let index = 0; index < arguments_.length; index += 2) {
@@ -309,7 +342,7 @@ function parseArguments(arguments_) {
     const value = arguments_[index + 1];
     if (!value || Object.hasOwn(values, name) ||
       !["--runtime-catalog-lock", "--toolchain-catalog-lock",
-        "--output-root", "--jre-id"].includes(name)) {
+        "--output-root", "--jre-id", "--registry-output", "--registry-root"].includes(name)) {
       throw new MaterializerFailure("invalid_arguments");
     }
     values[name] = value;
@@ -322,6 +355,10 @@ function parseArguments(arguments_) {
     runtimeCatalogPath: resolve(values["--runtime-catalog-lock"] ?? ""),
     toolchainCatalogPath: resolve(values["--toolchain-catalog-lock"] ?? ""),
     outputRoot: resolve(values["--output-root"] ?? ""),
+    registryOutput: values["--registry-output"] ?
+      resolve(values["--registry-output"]) : undefined,
+    registryRoot: values["--registry-root"] ?
+      resolve(values["--registry-root"]) : undefined,
     jreId: values["--jre-id"] ?? "java-runtime-delta-21",
   };
 }

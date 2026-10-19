@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import * as zlib from "node:zlib";
+import { compareUtf8 } from "../src/build-spec.mjs";
 import {
   DeterministicFakeArtifactDownloader,
   DeterministicFakeJreRegistry,
@@ -93,7 +94,7 @@ function bundleFor(toolchain, localFiles = [{
     path: file.path,
     sha256: sha(file.bytes),
     sizeBytes: file.bytes.byteLength,
-  })).sort((left, right) => left.path.localeCompare(right.path));
+  })).sort((left, right) => compareUtf8(left.path, right.path));
   return {
     manifest: {
       minecraftVersion: toolchain.minecraftVersion,
@@ -464,3 +465,72 @@ test("reviewed content is deterministic and excludes launcher-supplied shell, EU
   ));
   assert.ok(first.content.entries.every((entry) => !/(?:^|\/)(?:eula\.txt|java(?:w)?(?:\.exe)?)$/i.test(entry.path)));
 });
+
+test("prepared manifest and tar paths follow Go UTF-8 byte-string ordering", async () => {
+  const fixture = toolchainFixture();
+  const privateUsePath = "config/\ue000.txt";
+  const emojiPath = "config/\ud83d\ude00.txt";
+  const files = new Map([
+    [emojiPath, { bytes: bytes("emoji"), mode: 0o644 }],
+    [privateUsePath, { bytes: bytes("private-use"), mode: 0o644 }],
+  ]);
+  const built = await builderFor(fixture, { files }).build(buildInput(fixture));
+  const manifestPaths = built.content.entries.map((entry) => entry.path);
+  const archivePaths = rawZstdTarPaths(built.archive);
+  const expected = [...manifestPaths].sort(compareUtf8);
+
+  assert.ok(compareUtf8(privateUsePath, emojiPath) < 0);
+  assert.deepEqual(manifestPaths, expected);
+  assert.deepEqual(archivePaths, expected);
+  assert.ok(manifestPaths.indexOf(privateUsePath) < manifestPaths.indexOf(emojiPath));
+});
+
+function rawZstdTarPaths(archive) {
+  assert.deepEqual([...archive.subarray(0, 5)], [0x28, 0xb5, 0x2f, 0xfd, 0xa0]);
+  const expectedSize = new DataView(
+    archive.buffer,
+    archive.byteOffset + 5,
+    4,
+  ).getUint32(0, true);
+  const chunks = [];
+  let total = 0;
+  let offset = 9;
+  let last = false;
+  while (!last) {
+    const header = archive[offset] | (archive[offset + 1] << 8) |
+      (archive[offset + 2] << 16);
+    offset += 3;
+    last = (header & 1) === 1;
+    assert.equal((header >>> 1) & 3, 0);
+    const size = header >>> 3;
+    chunks.push(archive.subarray(offset, offset + size));
+    total += size;
+    offset += size;
+  }
+  assert.equal(total, expectedSize);
+  assert.equal(offset, archive.byteLength);
+  const tar = new Uint8Array(total);
+  let tarOffset = 0;
+  for (const chunk of chunks) {
+    tar.set(chunk, tarOffset);
+    tarOffset += chunk.byteLength;
+  }
+
+  const paths = [];
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (let cursor = 0; cursor + 512 <= tar.byteLength;) {
+    const header = tar.subarray(cursor, cursor + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const field = (start, length) => {
+      const bytes = header.subarray(start, start + length);
+      const end = bytes.indexOf(0);
+      return decoder.decode(end < 0 ? bytes : bytes.subarray(0, end));
+    };
+    const name = field(0, 100);
+    const prefix = field(345, 155);
+    paths.push(prefix ? `${prefix}/${name}` : name);
+    const size = Number.parseInt(field(124, 12).trim(), 8);
+    cursor += 512 + size + ((512 - (size % 512)) % 512);
+  }
+  return paths;
+}

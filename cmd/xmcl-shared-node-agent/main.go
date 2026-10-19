@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/voxelum/xmcl-shared-node-agent/internal/agent"
+	buildercore "github.com/voxelum/xmcl-shared-node-agent/internal/builder"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/config"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
 	dockerruntime "github.com/voxelum/xmcl-shared-node-agent/internal/docker"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/quota"
+	runtimecontract "github.com/voxelum/xmcl-shared-node-agent/internal/runtime"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/telemetry"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/workspace"
 )
@@ -71,6 +73,22 @@ func main() {
 	if err := runtime.Validate(ctx); err != nil {
 		fatal(logger, "validate Docker runtime", err)
 	}
+	builderIdentity := buildercore.Identity{
+		BuilderImage:             cfg.BuilderImage,
+		ToolchainCatalogRevision: cfg.BuilderCatalogRevision,
+		RuntimeImage:             cfg.ContainerImage,
+		RuntimeCatalogRevision:   runtimecontract.CatalogSHA256(),
+	}
+	builderRuntime, err := dockerruntime.NewBuilder(builderIdentity)
+	if err != nil {
+		fatal(logger, "initialize Docker builder", err)
+	}
+	if err := builderRuntime.Validate(ctx); err != nil {
+		fatal(logger, "validate Docker builder", err)
+	}
+	if err := builderRuntime.Reconcile(ctx); err != nil {
+		fatal(logger, "reconcile stale Docker builders", err)
+	}
 	transfer, err := workspace.NewDirectTransfer(
 		cfg.ObjectStorageEndpoint,
 		cfg.ObjectStorageBucket,
@@ -85,6 +103,21 @@ func main() {
 		transfer,
 		quota.NewHelper(cfg.WorkspaceRoot),
 	)
+	contentBuilder, err := buildercore.New(
+		cfg.BuilderRoot,
+		builderIdentity,
+		controlPlane,
+		transfer,
+		builderRuntime,
+		nil,
+	)
+	if err != nil {
+		fatal(logger, "initialize content builder", err)
+	}
+	if err := contentBuilder.Validate(); err != nil {
+		fatal(logger, "validate content builder", err)
+	}
+	contentBuilder.SetMetrics(telemetryProvider)
 	if err := workspaceManager.Validate(ctx); err != nil {
 		fatal(logger, "validate workspace manager", err)
 	}
@@ -112,6 +145,7 @@ func main() {
 		fatal(logger, "initialize service locks", err)
 	}
 	executor := agent.NewExecutor(cfg.NodeID, state, workspaceManager, runtime, locker)
+	executor.SetContentPreparer(contentBuilder)
 	if err := executor.Reconcile(ctx); err != nil {
 		fatal(logger, "reconcile local containers", err)
 	}
@@ -133,6 +167,11 @@ func main() {
 		},
 	}
 	if err := daemon.Run(ctx); err != nil {
+		if controlPlane.IsAuthenticationFailure(err) {
+			if markerErr := writeEnrollmentRejectedMarker(cfg.StateRoot, cfg.NodeID); markerErr != nil {
+				fatal(logger, "record enrollment rejection", markerErr)
+			}
+		}
 		fatal(logger, "agent stopped", err)
 	}
 }
@@ -159,11 +198,21 @@ func logCommandFailure(logger *log.Logger, command controlplane.Command, err err
 }
 
 func writeReadyMarker(stateRoot, nodeID string) error {
-	marker := filepath.Join(stateRoot, "bootstrap-ready")
+	return writeBootstrapMarker(stateRoot, "bootstrap-ready", nodeID, "heartbeat-confirmed")
+}
+
+func writeEnrollmentRejectedMarker(stateRoot, nodeID string) error {
+	return writeBootstrapMarker(
+		stateRoot, "bootstrap-enrollment-rejected", nodeID, "enrollment-rejected",
+	)
+}
+
+func writeBootstrapMarker(stateRoot, name, nodeID, status string) error {
+	marker := filepath.Join(stateRoot, name)
 	temporary := marker + ".tmp"
 	content, err := json.Marshal(map[string]string{
 		"nodeId": nodeID,
-		"status": "heartbeat-confirmed",
+		"status": status,
 	})
 	if err != nil {
 		return fmt.Errorf("encode readiness marker: %w", err)
@@ -189,6 +238,15 @@ func deriveNodeStatus(ctx context.Context, cfg config.Config, running func(conte
 		},
 		AgentVersion: agentVersion,
 		Ingress:      controlplane.Ingress{Host: cfg.IngressHost},
+		Platform:     controlplane.BuildTarget{OS: "linux", Architecture: "amd64"},
+		Runtime: controlplane.RuntimeImageIdentity{
+			Image: cfg.ContainerImage, RuntimeCatalogRevision: runtimecontract.CatalogSHA256(),
+		},
+		Builder: controlplane.BuildImageIdentity{
+			Image: cfg.BuilderImage, Schema: buildercore.Schema,
+			ToolchainCatalogRevision: cfg.BuilderCatalogRevision,
+		},
+		AvailableBuildSlots: 1,
 	}
 	services, err := running(ctx)
 	if err != nil {

@@ -1,0 +1,58 @@
+{
+  "request": {
+    "operationId": "op-fixture",
+    "authorizationId": "FIXTURE",
+    "jobId": "job-fixture",
+    "nodeId": "node-fixture",
+    "instanceId": "ecs-fixture",
+    "address": "8.8.8.8",
+    "sshPort": 22,
+    "enrollmentToken": "TEST-ONLY-NOT-A-CREDENTIAL",
+    "expectedProvider": {
+      "instanceName": "fixture",
+      "packageCode": "fixture",
+      "regionCode": "cn-taiwan-2",
+      "zoneCode": "cn-taiwan-2-a",
+      "imageResourceUUID": "img-fixture",
+      "firewallUUID": "fw-fixture",
+      "sshKeyUUID": "key-fixture"
+    },
+    "hostKeyPolicy": "isolated_test_tofu_v1",
+    "allocationCreatedAt": "2026-10-19T00:00:00Z",
+    "autoPinExpiresAt": "2026-10-19T00:10:00Z",
+    "expectedProviderIdentity": {
+      "provider": "lightnode",
+      "instanceId": "ecs-fixture",
+      "address": "8.8.8.8",
+      "sshPort": 22,
+      "instanceName": "fixture",
+      "packageCode": "fixture",
+      "regionCode": "cn-taiwan-2",
+      "zoneCode": "cn-taiwan-2-a",
+      "imageResourceUUID": "img-fixture",
+      "firewallUUID": "fw-fixture",
+      "sshKeyUUID": "key-fixture"
+    },
+    "config": {
+      "releaseManifestUrl": "https://fixture.invalid/release.json?x=1&y=2",
+      "releaseManifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "dockerPackageVersion": "fixture",
+      "controlPlaneUrl": "https://fixture.invalid",
+      "logicalRegion": "tpe",
+      "objectStorageEndpoint": "https://fixture.invalid",
+      "objectStorageRegion": "azure",
+      "objectStorageBucket": "fixture",
+      "workspaceVolumeGiB": 40,
+      "bootstrapTimeoutSeconds": 600
+    },
+    "expectedCapacity": {
+      "workloadClasses": [
+        "standard"
+      ],
+      "totalMemoryMiB": 8192,
+      "totalSharedCpu": 4,
+      "totalWorkspaceGiB": 32
+    }
+  },
+  "sha256": "7ecd10d87980ab59817dae9730edda89d62a1b998438800c14e6ad8f79ae54c5"
+}

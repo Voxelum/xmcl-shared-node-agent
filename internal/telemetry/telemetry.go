@@ -28,6 +28,8 @@ type Provider struct {
 	meterProvider   *sdkmetric.MeterProvider
 	transport       http.RoundTripper
 	commandFailures metric.Int64Counter
+	builds          metric.Int64Counter
+	buildDuration   metric.Float64Histogram
 }
 
 type WorkspaceMetrics struct {
@@ -119,10 +121,21 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+	buildMeter := meterProvider.Meter("github.com/voxelum/xmcl-shared-node-agent/internal/builder")
+	builds, err := buildMeter.Int64Counter("xmcl.shared.content_builds")
+	if err != nil {
+		return nil, err
+	}
+	buildDuration, err := buildMeter.Float64Histogram("xmcl.shared.content_build_duration_seconds")
+	if err != nil {
+		return nil, err
+	}
 	return &Provider{
 		tracerProvider:  tracerProvider,
 		meterProvider:   meterProvider,
 		commandFailures: commandFailures,
+		builds:          builds,
+		buildDuration:   buildDuration,
 		transport: otelhttp.NewTransport(
 			http.DefaultTransport,
 			otelhttp.WithSpanNameFormatter(func(_ string, request *http.Request) string {
@@ -130,6 +143,21 @@ func New(
 			}),
 		),
 	}, nil
+}
+
+func (p *Provider) RecordBuild(ctx context.Context, cache, code string, duration time.Duration) {
+	if p.builds == nil || p.buildDuration == nil {
+		return
+	}
+	if cache == "" {
+		cache = "failed"
+	}
+	attributes := metric.WithAttributes(
+		attribute.String("xmcl.build.cache", cache),
+		attribute.String("xmcl.build.failure_code", code),
+	)
+	p.builds.Add(ctx, 1, attributes)
+	p.buildDuration.Record(ctx, duration.Seconds(), attributes)
 }
 
 func (p *Provider) RecordCommandFailure(ctx context.Context, commandKind string) {

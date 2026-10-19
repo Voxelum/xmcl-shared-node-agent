@@ -47,12 +47,27 @@ type Transfer interface {
 	Upload(context.Context, controlplane.WorkspaceGrant, string, io.Reader, int64, string) (TransferResult, error)
 }
 
+func (m *Manager) restoreWorkspaceGrants(ctx context.Context, command controlplane.Command, phase string, keys []string) (controlplane.WorkspaceGrantResponse, error) {
+	command.Lease = controlplane.CurrentCommandLease(ctx, command.Lease)
+	return m.grants.RestoreWorkspaceGrants(ctx, command, phase, keys)
+}
+
+func (m *Manager) syncWorkspaceGrants(ctx context.Context, command controlplane.Command, manifest controlplane.WorkspaceManifest, manifestSHA string, keys []string) (controlplane.WorkspaceGrantResponse, error) {
+	command.Lease = controlplane.CurrentCommandLease(ctx, command.Lease)
+	return m.grants.SyncWorkspaceGrants(ctx, command, manifest, manifestSHA, keys)
+}
+
+func (m *Manager) publishWorkspaceGrant(ctx context.Context, command controlplane.Command, manifest controlplane.WorkspaceManifest, manifestSHA string) (controlplane.WorkspaceGrantResponse, error) {
+	command.Lease = controlplane.CurrentCommandLease(ctx, command.Lease)
+	return m.grants.PublishWorkspaceGrant(ctx, command, manifest, manifestSHA)
+}
+
 func (m *Manager) restoreInitialRuntimeContent(ctx context.Context, command controlplane.Command, workspacePath string) (string, error) {
 	content := *command.RuntimeContent
 	if err := validateRuntimeContent(content, command); err != nil {
 		return "", err
 	}
-	response, err := m.grants.RestoreWorkspaceGrants(ctx, command, "blobs", []string{content.Key})
+	response, err := m.restoreWorkspaceGrants(ctx, command, "blobs", []string{content.Key})
 	if err != nil {
 		return "", fmt.Errorf("request initial runtime content grant: %w", err)
 	}
@@ -111,7 +126,7 @@ func (m *Manager) restoreInitialWorld(ctx context.Context, command controlplane.
 		return err
 	}
 	key, _ := initialWorldKey(command)
-	response, err := m.grants.RestoreWorkspaceGrants(ctx, command, "initial-world", []string{key})
+	response, err := m.restoreWorkspaceGrants(ctx, command, "initial-world", []string{key})
 	if err != nil {
 		return fmt.Errorf("request initial world grant: %w", err)
 	}
@@ -147,7 +162,7 @@ func (m *Manager) restoreInitialWorld(ctx context.Context, command controlplane.
 		if attempt == transferAttempts-1 {
 			return fmt.Errorf("download initial world: %w", err)
 		}
-		response, grantErr := m.grants.RestoreWorkspaceGrants(ctx, command, "initial-world", []string{key})
+		response, grantErr := m.restoreWorkspaceGrants(ctx, command, "initial-world", []string{key})
 		if grantErr != nil {
 			return fmt.Errorf("refresh initial world grant: %w", grantErr)
 		}
@@ -270,7 +285,7 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 	}
 
 	manifestKey := manifestKey(command.Workspace.ObjectPrefix, command.Workspace.Revision)
-	response, err := m.grants.RestoreWorkspaceGrants(ctx, command, "manifest", nil)
+	response, err := m.restoreWorkspaceGrants(ctx, command, "manifest", nil)
 	if err != nil {
 		return "", fmt.Errorf("request manifest grant: %w", err)
 	}
@@ -345,7 +360,7 @@ func (m *Manager) Restore(ctx context.Context, command controlplane.Command) (st
 		for _, descriptor := range batch {
 			keys = append(keys, descriptor.Key)
 		}
-		blobGrants, err := m.grants.RestoreWorkspaceGrants(ctx, command, "blobs", keys)
+		blobGrants, err := m.restoreWorkspaceGrants(ctx, command, "blobs", keys)
 		if err != nil {
 			return "", fmt.Errorf("request blob grants: %w", err)
 		}
@@ -499,7 +514,7 @@ func (m *Manager) Sync(ctx context.Context, command controlplane.Command) (contr
 			end = len(descriptorKeys)
 		}
 		keys := descriptorKeys[start:end]
-		response, err := m.grants.SyncWorkspaceGrants(ctx, command, manifest, manifestSHA, keys)
+		response, err := m.syncWorkspaceGrants(ctx, command, manifest, manifestSHA, keys)
 		if err != nil {
 			return controlplane.SyncResult{}, fmt.Errorf("request sync grants: %w", err)
 		}
@@ -517,7 +532,7 @@ func (m *Manager) Sync(ctx context.Context, command controlplane.Command) (contr
 			}
 		}
 	}
-	publish, err := m.grants.PublishWorkspaceGrant(ctx, command, manifest, manifestSHA)
+	publish, err := m.publishWorkspaceGrant(ctx, command, manifest, manifestSHA)
 	if err != nil {
 		return controlplane.SyncResult{}, fmt.Errorf("request manifest publish grant: %w", err)
 	}
@@ -642,7 +657,7 @@ func (m *Manager) uploadArchiveWithRefresh(
 		if attempt == 0 {
 			return initial, nil
 		}
-		response, err := m.grants.SyncWorkspaceGrants(ctx, command, manifest, manifestSHA, []string{archive.descriptor.Key})
+		response, err := m.syncWorkspaceGrants(ctx, command, manifest, manifestSHA, []string{archive.descriptor.Key})
 		if err != nil {
 			return controlplane.WorkspaceGrant{}, fmt.Errorf("refresh workspace upload grant: %w", err)
 		}
@@ -725,7 +740,7 @@ func (m *Manager) downloadArchiveWithRefresh(
 		if attempt == 0 {
 			return initial, nil
 		}
-		response, err := m.grants.RestoreWorkspaceGrants(ctx, command, "blobs", []string{descriptor.Key})
+		response, err := m.restoreWorkspaceGrants(ctx, command, "blobs", []string{descriptor.Key})
 		if err != nil {
 			return controlplane.WorkspaceGrant{}, fmt.Errorf("refresh workspace blob grant: %w", err)
 		}
@@ -1274,10 +1289,9 @@ func validateRuntimeContent(content controlplane.WorkspaceBlob, command controlp
 		return err
 	}
 
-	if !validDescriptor(content) || !strings.HasPrefix(
-		content.Key,
-		prefix+"/compiler-content/",
-	) || !strings.HasSuffix(content.Key, ".tar.zst") ||
+	legacyKey := strings.HasPrefix(content.Key, prefix+"/compiler-content/") &&
+		strings.HasSuffix(content.Key, ".tar.zst")
+	if !validDescriptor(content) || (!legacyKey && !isPreparedContentKey(content.Key)) ||
 		!allPaths(content.Paths, isRuntimeContentPath) ||
 		!containsPath(content.Paths, ".xmcl/runtime.json") ||
 		!containsPath(content.Paths, ".xmcl/launch.sh") {
@@ -1383,7 +1397,17 @@ func extractInitialWorld(archivePath, workspacePath string, limit int64) error {
 
 func isCompilerContent(content controlplane.WorkspaceBlob) bool {
 	return strings.Contains(content.Key, "/compiler-content/") &&
-		strings.HasSuffix(content.Key, ".tar.zst")
+		strings.HasSuffix(content.Key, ".tar.zst") ||
+		isPreparedContentKey(content.Key)
+}
+
+func isPreparedContentKey(key string) bool {
+	const prefix = "shared-runtime/prepared/v1/linux-amd64/"
+	if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, "/content.tar.zst") {
+		return false
+	}
+	buildKey := strings.TrimSuffix(strings.TrimPrefix(key, prefix), "/content.tar.zst")
+	return len(buildKey) == 64 && validSHA256(buildKey) && !strings.Contains(buildKey, "/")
 }
 
 func containsPath(paths []string, wanted string) bool {

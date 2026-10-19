@@ -1,0 +1,498 @@
+{
+  "buildSpec": {
+    "schemaVersion": 1,
+    "source": {
+      "format": "zip",
+      "sha256": "8739c76e681f900923b900c9df0ef75cf421d39cabb54650c4b9ad19b6a76d85"
+    },
+    "compatibility": {
+      "minecraftVersion": "1.21.1",
+      "loader": {
+        "kind": "neoforge",
+        "version": "21.1.249"
+      },
+      "java": {
+        "component": "java-runtime-delta",
+        "major": 21
+      }
+    },
+    "files": [],
+    "dependencies": [],
+    "builder": {
+      "schema": "agent_builder_v1",
+      "image": "ghcr.io/voxelum/xmcl-shared-node-builder@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "toolchainCatalogRevision": "76440739a9ee0ffca1943b48b124eeeba45c606d694be78f19c292921f9cc066"
+    },
+    "runtime": {
+      "image": "ghcr.io/voxelum/xmcl-shared-minecraft-runtime@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3"
+    },
+    "target": {
+      "architecture": "amd64",
+      "os": "linux"
+    }
+  },
+  "expected": {
+    "compatibility": {
+      "minecraftVersion": "1.21.1",
+      "loader": {
+        "kind": "neoforge",
+        "version": "21.1.249"
+      },
+      "java": {
+        "component": "java-runtime-delta",
+        "major": 21
+      }
+    },
+    "catalogRevision": "76440739a9ee0ffca1943b48b124eeeba45c606d694be78f19c292921f9cc066",
+    "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3",
+    "jre": {
+      "component": "java-runtime-delta",
+      "id": "java-runtime-delta-21",
+      "major": 21,
+      "runtimeCatalogRevision": "7d35cc796811673ad1d22272d0ca3e5614d4ed7b3c6b01defb6e2330fe48bcc3",
+      "sha256": "2b3bf58669d502aae932fc492019c1d33bc3439dce1d7951110802d55a8b427d"
+    },
+    "launchTemplate": "neoforge-unix-args-v1",
+    "requiredArtifacts": [
+      {
+        "coordinate": "com.electronwill.night-config:core:3.8.3",
+        "role": "dependency",
+        "sha256": "971dc88c1c22085611ee1c300f5bbf8595938178e819befbb5e98c3cbd272b79",
+        "sizeBytes": 382911
+      },
+      {
+        "coordinate": "com.electronwill.night-config:toml:3.8.3",
+        "role": "dependency",
+        "sha256": "ccb92882264bf071e3916ab122fe5ea3e211b8ebf199201698a1324f151f928f",
+        "sizeBytes": 39516
+      },
+      {
+        "coordinate": "com.google.code.findbugs:jsr305:3.0.2",
+        "role": "dependency",
+        "sha256": "766ad2a0783f2687962c8ad74ceecc38a28b9f72a2d085ee438b7813e928d0c7",
+        "sizeBytes": 19936
+      },
+      {
+        "coordinate": "com.google.code.gson:gson:2.10.1",
+        "role": "dependency",
+        "sha256": "4241c14a7727c34feea6507ec801318a3d4a90f070e4525681079fb94ee4c593",
+        "sizeBytes": 283367
+      },
+      {
+        "coordinate": "com.google.code.gson:gson:2.8.9",
+        "role": "dependency",
+        "sha256": "d3999291855de495c94c743761b8ab5176cfeabe281a5ab0d8e8d45326fd703e",
+        "sizeBytes": 258075
+      },
+      {
+        "coordinate": "com.google.errorprone:error_prone_annotations:2.18.0",
+        "role": "dependency",
+        "sha256": "9e6814cb71816988a4fd1b07a993a8f21bb7058d522c162b1de849e19bea54ae",
+        "sizeBytes": 16017
+      },
+      {
+        "coordinate": "com.google.guava:failureaccess:1.0.1",
+        "role": "dependency",
+        "sha256": "a171ee4c734dd2da837e4b16be9df4661afab72a41adaf31eb84dfdaf936ca26",
+        "sizeBytes": 4617
+      },
+      {
+        "coordinate": "com.google.guava:guava:20.0",
+        "role": "dependency",
+        "sha256": "36a666e3b71ae7f0f0dca23654b67e086e6c93d192f60ba5dfd5519db6c288c8",
+        "sizeBytes": 2442625
+      },
+      {
+        "coordinate": "com.google.guava:guava:32.1.2-jre",
+        "role": "dependency",
+        "sha256": "bc65dea7cfd9e4dacf8419d8af0e741655857d27885bb35d943d7187fc3a8fce",
+        "sizeBytes": 3041591
+      },
+      {
+        "coordinate": "com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava",
+        "role": "dependency",
+        "sha256": "b372a037d4230aa57fbeffdef30fd6123f9c0c2db85d0aced00c91b974f33f99",
+        "sizeBytes": 2199
+      },
+      {
+        "coordinate": "com.google.j2objc:j2objc-annotations:2.8",
+        "role": "dependency",
+        "sha256": "f02a95fa1a5e95edb3ed859fd0fb7df709d121a35290eff8b74dce2ab7f4d6ed",
+        "sizeBytes": 9301
+      },
+      {
+        "coordinate": "com.machinezoo.noexception:noexception:1.7.1",
+        "role": "dependency",
+        "sha256": "3d70aaea3904918587a21bdf99ab6ade9ab1dd0eaf6119344ba513f60f575816",
+        "sizeBytes": 250861
+      },
+      {
+        "coordinate": "com.mojang:logging:1.2.7",
+        "role": "dependency",
+        "sha256": "3dc3190204bac5f4184d8405bfe1f724f73a6a15a0d3f36ec7f69e6872c1a76c",
+        "sizeBytes": 15343
+      },
+      {
+        "coordinate": "com.mojang:minecraft-server:1.21.1:server",
+        "role": "dependency",
+        "sha256": "e3bc55693e93cda0188f2e60aea28113fc647c5e85a15fa3d1b347349231b4bb",
+        "sizeBytes": 51627615
+      },
+      {
+        "coordinate": "com.opencsv:opencsv:4.4",
+        "role": "dependency",
+        "sha256": "5d8969c14c7acecc318a9321d34b1289afd1bdd41c0e772667fd0a4f53e291a0",
+        "sizeBytes": 167167
+      },
+      {
+        "coordinate": "commons-beanutils:commons-beanutils:1.9.3",
+        "role": "dependency",
+        "sha256": "c058e39c7c64203d3a448f3adb588cb03d6378ed808485618f26e137f29dae73",
+        "sizeBytes": 246174
+      },
+      {
+        "coordinate": "commons-collections:commons-collections:3.2.2",
+        "role": "dependency",
+        "sha256": "eeeae917917144a68a741d4c0dff66aa5c5c5fd85593ff217bced3fc8ca783b8",
+        "sizeBytes": 588337
+      },
+      {
+        "coordinate": "commons-io:commons-io:2.15.1",
+        "role": "dependency",
+        "sha256": "a58af12ee1b68cfd2ebb0c27caef164f084381a00ec81a48cc275fd7ea54e154",
+        "sizeBytes": 501218
+      },
+      {
+        "coordinate": "commons-logging:commons-logging:1.2",
+        "role": "dependency",
+        "sha256": "daddea1ea0be0f56978ab3006b8ac92834afeefbd9b7e4e6316fca57df0fa636",
+        "sizeBytes": 61829
+      },
+      {
+        "coordinate": "cpw.mods:bootstraplauncher:2.0.2",
+        "role": "dependency",
+        "sha256": "d3f29309140540570fd6c709509706aa8fb133c1c8aef24491688f1a3f4e1d49",
+        "sizeBytes": 11116
+      },
+      {
+        "coordinate": "cpw.mods:modlauncher:11.0.5",
+        "role": "dependency",
+        "sha256": "fd9b9fc7cf043d2264ea0113eac6b258f0a71fece5b00e831bfbdf9726c78a24",
+        "sizeBytes": 116486
+      },
+      {
+        "coordinate": "cpw.mods:securejarhandler:3.0.8",
+        "role": "dependency",
+        "sha256": "945c63d6deafc821616b0380c23867d9b8c2852438f8a6df72732ab933fc587d",
+        "sizeBytes": 103765
+      },
+      {
+        "coordinate": "de.siegmar:fastcsv:2.0.0",
+        "role": "dependency",
+        "sha256": "665d52cb6f35ca236919be9ac81653c208628507f91d6bf13479bc11496db616",
+        "sizeBytes": 29476
+      },
+      {
+        "coordinate": "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7",
+        "role": "dependency",
+        "sha256": "1d45cfe3ae4a2eab38dc74276803748cf799088986260d6d912e50ddb35d15c5",
+        "sizeBytes": 1494751
+      },
+      {
+        "coordinate": "net.jodah:typetools:0.6.3",
+        "role": "dependency",
+        "sha256": "408300867804be05d1083cc0287dd3a21295a9e76090e288013ba5a4182dc96d",
+        "sizeBytes": 18281
+      },
+      {
+        "coordinate": "net.md-5:SpecialSource:1.11.0",
+        "role": "dependency",
+        "sha256": "a47cd9a3db46a0cc3b769bd19a2a91d4ad0e9d019153d186f099bbaf5db16445",
+        "sizeBytes": 88737
+      },
+      {
+        "coordinate": "net.minecraft:server:1.21.1-20240808.144430:mappings",
+        "role": "dependency",
+        "sha256": "9d0b04bead421c8229aff14b534432bbc927bea642e7c8593d1276b8df8ba53f",
+        "sizeBytes": 7456063
+      },
+      {
+        "coordinate": "net.minecraftforge:srgutils:0.4.15",
+        "role": "dependency",
+        "sha256": "f6bdebb7fae108329acddfc812f237c7f6328a98e3f282a105edfc161d0215e3",
+        "sizeBytes": 69393
+      },
+      {
+        "coordinate": "net.minecrell:terminalconsoleappender:1.3.0",
+        "role": "dependency",
+        "sha256": "1afea1bca095068f7f4483f061feed94753be34233ddb0df9ec380fc14d5a985",
+        "sizeBytes": 16949
+      },
+      {
+        "coordinate": "net.neoforged.accesstransformers:at-modlauncher:10.0.1",
+        "role": "dependency",
+        "sha256": "2a4b447c6944a2b89e383c1eed9a26bb5cc60330a5bb26ef0a912a38d52df935",
+        "sizeBytes": 2347
+      },
+      {
+        "coordinate": "net.neoforged.fancymodloader:earlydisplay:4.0.44",
+        "role": "dependency",
+        "sha256": "96922d7589000af7550f42d437f05676eea6b9708823e47c78e882560746042e",
+        "sizeBytes": 261718
+      },
+      {
+        "coordinate": "net.neoforged.fancymodloader:loader:4.0.44",
+        "role": "dependency",
+        "sha256": "f2096cd86d605c0484971fc712208e0dc6cecfe53e056db61d44a98cadc19499",
+        "sizeBytes": 505708
+      },
+      {
+        "coordinate": "net.neoforged.installertools:binarypatcher:2.1.2:fatjar",
+        "role": "dependency",
+        "sha256": "9d73d565b775c8ec9da83da6d2a25454c7aad95eba22f64def9261f214cc49ba",
+        "sizeBytes": 624217
+      },
+      {
+        "coordinate": "net.neoforged.installertools:cli-utils:2.1.2",
+        "role": "dependency",
+        "sha256": "023a5a0cc7579fbf10a0bdd2a47a8ac1a10046a6432fef36ec850ab1ccf5504d",
+        "sizeBytes": 9379
+      },
+      {
+        "coordinate": "net.neoforged.installertools:installertools:2.1.2",
+        "role": "dependency",
+        "sha256": "fc695a63f7cdc7f673f7a94d94c9f35518850594bd8fa5c933b0fff38352d8bb",
+        "sizeBytes": 83543
+      },
+      {
+        "coordinate": "net.neoforged.installertools:jarsplitter:2.1.2",
+        "role": "dependency",
+        "sha256": "fe98ac94c75afcf77b1b6156effcffe72140d861f7e165303c35a5abe1a4f834",
+        "sizeBytes": 7790
+      },
+      {
+        "coordinate": "net.neoforged:AutoRenamingTool:2.0.3:all",
+        "role": "dependency",
+        "sha256": "43fcb978664ba04fc0b3b1b1a14eccabb4bc87b7a415e0eb8bdd1c2f12324321",
+        "sizeBytes": 746919
+      },
+      {
+        "coordinate": "net.neoforged:JarJarFileSystems:0.4.1",
+        "role": "dependency",
+        "sha256": "d9f88af1223ff23395c64ff0b0fe367563288a37bd38709bf667b6b39944bfab",
+        "sizeBytes": 31807
+      },
+      {
+        "coordinate": "net.neoforged:JarJarMetadata:0.4.1",
+        "role": "dependency",
+        "sha256": "05d7b89f09c6de1a9b61d0e786c8fd808aed044babf321653e14abd6740d5546",
+        "sizeBytes": 15648
+      },
+      {
+        "coordinate": "net.neoforged:JarJarSelector:0.4.1",
+        "role": "dependency",
+        "sha256": "f34bab02a5e967650dc52b7cb37a200051a7078f7d1868597699d78697da2400",
+        "sizeBytes": 17168
+      },
+      {
+        "coordinate": "net.neoforged:accesstransformers:10.0.1",
+        "role": "dependency",
+        "sha256": "89fb0dc3d68f8a5961f309ee110dad7d2c1094ba204595602b71e02e104838a1",
+        "sizeBytes": 67234
+      },
+      {
+        "coordinate": "net.neoforged:bus:8.0.5",
+        "role": "dependency",
+        "sha256": "705e24f37752809499a5cd0c7dd31eaabf3d933c5d3b2060168e94e9ef62593a",
+        "sizeBytes": 30340
+      },
+      {
+        "coordinate": "net.neoforged:coremods:7.0.3",
+        "role": "dependency",
+        "sha256": "d24c0d3e31af23cac36a0f9f98654b875f678b27ddccd8b28d331c1878a6de4a",
+        "sizeBytes": 22659
+      },
+      {
+        "coordinate": "net.neoforged:mergetool:2.0.0:api",
+        "role": "dependency",
+        "sha256": "0260881294d8b218afe3d673f084d3745a55c28b35205d07d5e62d7f22202a00",
+        "sizeBytes": 2550
+      },
+      {
+        "coordinate": "net.neoforged:neoforge:21.1.249:installer",
+        "role": "primary",
+        "sha256": "d88b448eab73cd65bdf1720844a4828262de30a15fc71bd04dd81acc61c5399a",
+        "sizeBytes": 6972110
+      },
+      {
+        "coordinate": "net.neoforged:neoforge:21.1.249:universal",
+        "role": "dependency",
+        "sha256": "63ba902edcae4476d49ffc28b18d566b0fcc5bf12edebcce1a2033f254f28155",
+        "sizeBytes": 3551266
+      },
+      {
+        "coordinate": "net.neoforged:neoform:1.21.1-20240808.144430",
+        "role": "dependency",
+        "sha256": "3fcdf0f0d115774cfceaf206a05a6dc964e2189bfd00f5b5f863e37f4b7733c7",
+        "sizeBytes": 1683830
+      },
+      {
+        "coordinate": "net.neoforged:srgutils:1.0.0",
+        "role": "dependency",
+        "sha256": "16663ae2504a0522cca386af6c11281d3fde61d25b6bd2690d7200e900b26c36",
+        "sizeBytes": 71421
+      },
+      {
+        "coordinate": "net.sf.jopt-simple:jopt-simple:5.0.4",
+        "role": "dependency",
+        "sha256": "df26cc58f235f477db07f753ba5a3ab243ebe5789d9f89ecf68dd62ea9a66c28",
+        "sizeBytes": 78146
+      },
+      {
+        "coordinate": "org.antlr:antlr4-runtime:4.13.1",
+        "role": "dependency",
+        "sha256": "54665d2838cc66458343468efc539e454fc95b46a8a04b13c6ac43fc9be63505",
+        "sizeBytes": 326305
+      },
+      {
+        "coordinate": "org.apache.commons:commons-collections4:4.2",
+        "role": "dependency",
+        "sha256": "6a594721d51444fd97b3eaefc998a77f606dedb03def494f74755aead3c9df3e",
+        "sizeBytes": 752798
+      },
+      {
+        "coordinate": "org.apache.commons:commons-lang3:3.14.0",
+        "role": "dependency",
+        "sha256": "7b96bf3ee68949abb5bc465559ac270e0551596fa34523fddf890ec418dde13c",
+        "sizeBytes": 657952
+      },
+      {
+        "coordinate": "org.apache.commons:commons-lang3:3.8.1",
+        "role": "dependency",
+        "sha256": "dac807f65b07698ff39b1b07bfef3d87ae3fd46d91bbf8a2bc02b2a831616f68",
+        "sizeBytes": 501879
+      },
+      {
+        "coordinate": "org.apache.commons:commons-text:1.3",
+        "role": "dependency",
+        "sha256": "8185b3a5311092d83ed1f184c2d093b3105d726bbd76867c32b3511542bb99a8",
+        "sizeBytes": 182954
+      },
+      {
+        "coordinate": "org.apache.logging.log4j:log4j-api:2.22.1",
+        "role": "dependency",
+        "sha256": "5d7beae7ff15d8516d6517121d7f12a79a6ac180df64b5fcec55d5be21056e53",
+        "sizeBytes": 335001
+      },
+      {
+        "coordinate": "org.apache.logging.log4j:log4j-core:2.22.1",
+        "role": "dependency",
+        "sha256": "46dccecac556623d8e2ce8648496824a82951d139062a4e61148aff1a25ed18d",
+        "sizeBytes": 1900022
+      },
+      {
+        "coordinate": "org.apache.logging.log4j:log4j-slf4j2-impl:2.22.1",
+        "role": "dependency",
+        "sha256": "1920cd69d8682c7ef249bb407a3d0685723aa1785867cf4c53258da6bf14da97",
+        "sizeBytes": 27364
+      },
+      {
+        "coordinate": "org.apache.maven:maven-artifact:3.8.5",
+        "role": "dependency",
+        "sha256": "91172bc294d6eab02fc9f45f4ea01fd0e418962d128cf489abea7b6957d988ee",
+        "sizeBytes": 58077
+      },
+      {
+        "coordinate": "org.checkerframework:checker-qual:3.33.0",
+        "role": "dependency",
+        "sha256": "e316255bbfcd9fe50d165314b85abb2b33cb2a66a93c491db648e498a82c2de1",
+        "sizeBytes": 223979
+      },
+      {
+        "coordinate": "org.codehaus.plexus:plexus-utils:3.3.0",
+        "role": "dependency",
+        "sha256": "76d174792540e2775af94d03d10fb2d3c776e2cd0ac0ebf427d3e570072bb9ce",
+        "sizeBytes": 263253
+      },
+      {
+        "coordinate": "org.jline:jline-reader:3.20.0",
+        "role": "dependency",
+        "sha256": "acd1c94d1e228aa7b7962f69b21ed3a9fd828eb3a63e4baf9086954e626af1f0",
+        "sizeBytes": 171052
+      },
+      {
+        "coordinate": "org.jline:jline-terminal:3.20.0",
+        "role": "dependency",
+        "sha256": "12125170e795519ba6dc8010c070b53c76aae92b485c1e37530e54ab5dd08d43",
+        "sizeBytes": 228481
+      },
+      {
+        "coordinate": "org.openjdk.nashorn:nashorn-core:15.4",
+        "role": "dependency",
+        "sha256": "6f816e84dfd63a81d4eaa7829c08337bbaff3ec683ff3bf6bbd90d017a00dc6f",
+        "sizeBytes": 2167292
+      },
+      {
+        "coordinate": "org.ow2.asm:asm-analysis:9.10.1",
+        "role": "dependency",
+        "sha256": "dede75a21306b65974ecd8f87114ff6970f09fb794157a4ca09ab25c888c2bfc",
+        "sizeBytes": 35140
+      },
+      {
+        "coordinate": "org.ow2.asm:asm-analysis:9.3",
+        "role": "dependency",
+        "sha256": "37fd5392bb2cf4c15f202ffefd46d0e92bb34ff848c549f30d426a60d6b29495",
+        "sizeBytes": 34276
+      },
+      {
+        "coordinate": "org.ow2.asm:asm-commons:9.10.1",
+        "role": "dependency",
+        "sha256": "6d0abefb7cbf972ea16edb37ec14835372505063a45f976ab7ea889ed9497895",
+        "sizeBytes": 74840
+      },
+      {
+        "coordinate": "org.ow2.asm:asm-commons:9.3",
+        "role": "dependency",
+        "sha256": "a347c24732db2aead106b6e5996a015b06a3ef86e790a4f75b61761f0d2f7f39",
+        "sizeBytes": 72716
+      },
+      {
+        "coordinate": "org.ow2.asm:asm-tree:9.10.1",
+        "role": "dependency",
+        "sha256": "3dfb0d5b6a106cd40b5b250e39935fbf2f927f4477546a5369a3ac609cf0506b",
+        "sizeBytes": 51958
+      },
+      {
+        "coordinate": "org.ow2.asm:asm-tree:9.3",
+        "role": "dependency",
+        "sha256": "ae629c2609f39681ef8d140a42a23800464a94f2d23e36d8f25cd10d5e4caff4",
+        "sizeBytes": 52669
+      },
+      {
+        "coordinate": "org.ow2.asm:asm-util:9.10.1",
+        "role": "dependency",
+        "sha256": "1bb99d091fba2597dc6d51193e9bbcf0d8447e7ed96bd8f0198b18152f09655c",
+        "sizeBytes": 95628
+      },
+      {
+        "coordinate": "org.ow2.asm:asm:9.10.1",
+        "role": "dependency",
+        "sha256": "ed825d10ab1399c8c0cb669e688cf0c8c82629b4c8399b58352b68e92ca10fcb",
+        "sizeBytes": 126151
+      },
+      {
+        "coordinate": "org.ow2.asm:asm:9.3",
+        "role": "dependency",
+        "sha256": "1263369b59e29c943918de11d6d6152e2ec6085ce63e5710516f8c67d368e4bc",
+        "sizeBytes": 122176
+      },
+      {
+        "coordinate": "org.slf4j:slf4j-api:2.0.9",
+        "role": "dependency",
+        "sha256": "0818930dc8d7debb403204611691da58e49d42c50b6ffcfdce02dadb7c3c2b6c",
+        "sizeBytes": 64579
+      }
+    ]
+  }
+}

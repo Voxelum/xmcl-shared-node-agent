@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { CompilerFailure } from "./bundle.mjs";
+import { compareUtf8 } from "./build-spec.mjs";
 import { catalogRevisionFor } from "./toolchain-catalog.mjs";
 import {
   PRODUCTION_OUTPUT_LIMITS,
@@ -883,7 +884,8 @@ function validateOutputFiles(files) {
   }
   const sizes = [];
   const entries = [];
-  for (const [path, file] of [...files.entries()].sort(([left], [right]) => comparePath(left, right))) {
+  for (const [path, file] of [...files.entries()].sort(([left], [right]) =>
+    compareUtf8(left, right))) {
     if (!safeOutputPath(path) ||
       (path !== ".xmcl/runtime.json" && path !== ".xmcl/launch.sh" && forbiddenOutputPath(path)) ||
       !(file?.bytes instanceof Uint8Array) || !validOutputMode(file.mode)) {
@@ -913,7 +915,8 @@ function packageDeterministicTarZst(files) {
 function packageTar(files) {
   const chunks = [];
   let total = 0;
-  for (const [path, file] of [...files.entries()].sort(([left], [right]) => comparePath(left, right))) {
+  for (const [path, file] of [...files.entries()].sort(([left], [right]) =>
+    compareUtf8(left, right))) {
     const header = new Uint8Array(512);
     const { name, prefix } = splitTarPath(path);
     writeTarText(header, 0, 100, name);
@@ -1043,7 +1046,7 @@ function validateEntryMetadata(entries) {
         forbiddenOutputPath(entry.path)) ||
       !validSha256(entry.sha256) ||
       !Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0 ||
-      !validOutputMode(entry.mode) || (previous && comparePath(previous, entry.path) >= 0)) {
+      !validOutputMode(entry.mode) || (previous && compareUtf8(previous, entry.path) >= 0)) {
       throw new CompilerFailure("invalid_builder_output");
     }
     previous = entry.path;
@@ -1238,10 +1241,6 @@ function concatenate(chunks, total) {
     offset += chunk.byteLength;
   }
   return output;
-}
-
-function comparePath(left, right) {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function deepFreeze(value) {

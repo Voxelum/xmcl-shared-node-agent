@@ -54,6 +54,17 @@ func (r *fakeRuntime) Stop(context.Context, controlplane.Command) error {
 }
 func (r *fakeRuntime) Running(context.Context) ([]RunningService, error) { return r.running, nil }
 
+type fakePreparer struct {
+	calls  int
+	result controlplane.PreparedContentResult
+	err    error
+}
+
+func (p *fakePreparer) Prepare(context.Context, controlplane.Command) (controlplane.PreparedContentResult, error) {
+	p.calls++
+	return p.result, p.err
+}
+
 func testCommand(kind, id, node, assignment string) controlplane.Command {
 	return controlplane.Command{
 		CommandID: id, Kind: kind, NodeID: node, ServiceID: "service_1", AssignmentID: assignment,
@@ -69,6 +80,7 @@ func TestCommandIDExecutesOnceAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	firstWorkspace, firstRuntime := &fakeWorkspace{}, &fakeRuntime{}
 	first := NewExecutor("node_1", store, firstWorkspace, firstRuntime)
 	command := testCommand(controlplane.RestoreAndStart, "command_1", "node_1", "assignment_1")
@@ -86,6 +98,36 @@ func TestCommandIDExecutesOnceAfterRestart(t *testing.T) {
 	}
 	if firstRuntime.starts != 1 || secondRuntime.starts != 0 || secondWorkspace.restores != 0 {
 		t.Fatalf("command replay performed work: first=%d second=%d restores=%d", firstRuntime.starts, secondRuntime.starts, secondWorkspace.restores)
+	}
+}
+
+func TestContentPrepareIsIdempotentAndPreservesActiveAssignment(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetActive("service_1", ActiveAssignment{
+		AssignmentID: "running-assignment", Phase: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	preparer := &fakePreparer{result: controlplane.PreparedContentResult{
+		Cache: "built", BuildKey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}}
+	executor := NewExecutor("node_1", store, &fakeWorkspace{}, &fakeRuntime{})
+	executor.SetContentPreparer(preparer)
+	command := testCommand(controlplane.ContentPrepare, "prepare_1", "node_1", "build-assignment")
+	first, err := executor.Execute(t.Context(), command)
+	if err != nil || first.Status != "prepared" || first.Prepared == nil {
+		t.Fatalf("prepare result = %#v, %v", first, err)
+	}
+	second, err := executor.Execute(t.Context(), command)
+	if err != nil || second.Prepared == nil || preparer.calls != 1 {
+		t.Fatalf("prepare replay = %#v, calls = %d, error = %v", second, preparer.calls, err)
+	}
+	active, exists, err := store.Active("service_1")
+	if err != nil || !exists || active.AssignmentID != "running-assignment" || active.Phase != "running" {
+		t.Fatalf("active assignment changed: %#v, %v, %v", active, exists, err)
 	}
 }
 

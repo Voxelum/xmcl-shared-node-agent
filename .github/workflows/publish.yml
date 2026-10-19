@@ -37,15 +37,30 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          # This branch is an isolated test publication, never a production/default release.
+          test "$GITHUB_REF" = "refs/heads/test/lightnode-20261019-r1"
+          test "$RELEASE_TAG" = "v0.3.22-lightnode.20261019.1"
+          [[ "$GITHUB_SHA" =~ ^[a-f0-9]{40}$ ]]
           existing_tags=$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")
-          if [[ -n "$existing_tags" ]]; then
-            test "$(cut -f1 <<<"$existing_tags")" = "$GITHUB_SHA"
-          fi
+          # The publisher creates a new lightweight tag first; never create or replace it here.
+          test -n "$existing_tags"
+          test "$(cut -f1 <<<"$existing_tags")" = "$GITHUB_SHA"
           existing_releases=$(gh api --paginate \
             "/repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name')
-          ! grep -Fxq "$RELEASE_TAG" <<<"$existing_releases"
+          if grep -Fxq "$RELEASE_TAG" <<<"$existing_releases"; then
+            echo "release already exists; refusing publication" >&2
+            exit 1
+          fi
           go test ./...
+          (cd compiler && node --test test/agent-builder.test.mjs \
+            test/process-quiescer.test.mjs \
+            test/jre-materializer.test.mjs \
+            test/production-adapters.test.mjs \
+            test/reviewed-builder.test.mjs \
+            test/verified-jre-mount.test.mjs)
+          (cd compiler && node test/compiler.test.mjs)
+          python3 scripts/test_prerelease_gate.py
+          python3 scripts/test_release_manifest.py
           python3 -m unittest discover -s runtime-image/tests -v
           python3 runtime-image/scripts/validate_runtime_assets.py
           python3 runtime-image/scripts/validate_runtime_catalog.py
@@ -90,6 +105,8 @@ jobs:
             dist/lightnode-runner-verify/runner.sh
           test -x dist/lightnode-runner-verify/bootstrap.sh
           test -x dist/lightnode-runner-verify/runner.sh
+      - name: Record observed same-build agent version
+        run: python3 scripts/write_agent_version_receipt.py
       - name: Materialize and verify runtime image inputs
         run: |
           python3 runtime-image/scripts/materialize_runtime_assets.py \
@@ -149,6 +166,8 @@ jobs:
         run: |
           echo "sha256=$(sha256sum runtime-image/runtime-catalog.lock.json | cut -d' ' -f1)" \
             >> "$GITHUB_OUTPUT"
+          echo "toolchain=$(jq -er '.catalogRevision' compiler/toolchain-catalog.lock.json)" \
+            >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         id: image
         if: steps.registry.outputs.existing != 'true'
@@ -171,6 +190,64 @@ jobs:
           digest="${EXISTING_DIGEST:-$BUILT_DIGEST}"
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Reconcile immutable builder registry tags
+        id: builder-registry
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          inspect_tag() {
+            local image="$1" output digest
+            if output=$(docker buildx imagetools inspect "$image" 2>&1); then
+              digest=$(awk '$1 == "Digest:" { print $2; exit }' <<<"$output")
+              [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+              printf 'present %s\n' "$digest"
+            elif grep -Eqi 'not found|manifest unknown' <<<"$output"; then
+              printf 'absent -\n'
+            else
+              echo "$output" >&2
+              return 1
+            fi
+          }
+          read -r release_status release_digest < <(inspect_tag \
+            "ghcr.io/voxelum/xmcl-shared-node-builder:$RELEASE_TAG")
+          read -r commit_status commit_digest < <(inspect_tag \
+            "ghcr.io/voxelum/xmcl-shared-node-builder:sha-$GITHUB_SHA")
+          if [[ "$release_status" == absent && "$commit_status" == absent ]]; then
+            echo "existing=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$release_status" == present && "$commit_status" == present &&
+            "$release_digest" == "$commit_digest" ]]; then
+            echo "existing=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$release_digest" >> "$GITHUB_OUTPUT"
+          else
+            echo "builder registry tags are partial or conflicting" >&2
+            exit 1
+          fi
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: builder-image
+        if: steps.builder-registry.outputs.existing != 'true'
+        with:
+          context: .
+          file: compiler/Dockerfile.builder
+          push: true
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}
+            BUILDER_SCHEMA=agent_builder_v1
+            TOOLCHAIN_CATALOG_REVISION=${{ steps.catalog.outputs.toolchain }}
+            RUNTIME_CATALOG_REVISION=${{ steps.catalog.outputs.sha256 }}
+          tags: |
+            ghcr.io/voxelum/xmcl-shared-node-builder:${{ inputs.tag }}
+            ghcr.io/voxelum/xmcl-shared-node-builder:sha-${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Resolve published builder image digest
+        id: builder-image-result
+        env:
+          BUILT_DIGEST: ${{ steps.builder-image.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.builder-registry.outputs.digest }}
+        run: |
+          digest="${EXISTING_DIGEST:-$BUILT_DIGEST}"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Verify published image catalog binding
         env:
           CATALOG_SHA256: ${{ steps.catalog.outputs.sha256 }}
@@ -181,17 +258,58 @@ jobs:
           actual=$(docker image inspect "$image" \
             --format '{{ index .Config.Labels "io.xmcl.runtime-catalog-sha256" }}')
           test "$actual" = "$CATALOG_SHA256"
+      - name: Verify published builder identity
+        env:
+          BUILDER_DIGEST: ${{ steps.builder-image-result.outputs.digest }}
+          TOOLCHAIN_REVISION: ${{ steps.catalog.outputs.toolchain }}
+          RUNTIME_REVISION: ${{ steps.catalog.outputs.sha256 }}
+        run: |
+          image="ghcr.io/voxelum/xmcl-shared-node-builder@$BUILDER_DIGEST"
+          docker pull "$image" >/dev/null
+          test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.xmcl.builder.schema" }}')" = agent_builder_v1
+          test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.xmcl.builder.toolchain-catalog-revision" }}')" = "$TOOLCHAIN_REVISION"
+          test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.xmcl.builder.runtime-catalog-revision" }}')" = "$RUNTIME_REVISION"
+          test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.xmcl.builder.target" }}')" = linux-amd64
+      - name: Probe published Builder outer Docker boundary
+        env:
+          BUILDER_DIGEST: ${{ steps.builder-image-result.outputs.digest }}
+          XMCL_BUILDER_DOCKER_LIVE_TEST: "1"
+        run: |
+          export XMCL_BUILDER_DOCKER_TEST_IMAGE="ghcr.io/voxelum/xmcl-shared-node-builder@$BUILDER_DIGEST"
+          go test ./internal/docker \
+            -run '^TestBuilder(OuterDockerSandbox|ProcessQuiescer)Live$' \
+            -count=1 -v
+      - name: Probe real offline NeoForge entrypoint and consume its output
+        env:
+          BUILDER_DIGEST: ${{ steps.builder-image-result.outputs.digest }}
+          RUNTIME_DIGEST: ${{ steps.image-result.outputs.digest }}
+          XMCL_BUILDER_DOCKER_LIVE_TEST: "1"
+        run: |
+          export XMCL_BUILDER_DOCKER_TEST_IMAGE="ghcr.io/voxelum/xmcl-shared-node-builder@$BUILDER_DIGEST"
+          export XMCL_BUILDER_PROBE_RUNTIME_IMAGE="ghcr.io/voxelum/xmcl-shared-minecraft-runtime@$RUNTIME_DIGEST"
+          export XMCL_BUILDER_PROBE_ROOT="$RUNNER_TEMP/builder-neoforge-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'sudo rm -rf -- "$XMCL_BUILDER_PROBE_ROOT"' EXIT
+          node compiler/scripts/materialize_builder_probe.mjs
+          go test ./internal/docker -run '^TestBuilderEntrypointNeoForgeLive$' -count=1 -v -timeout=20m
+          # The production agent runs as root; the hosted test user does not.
+          # Change ownership only after the unmodified UID-10001 builder exits.
+          sudo chown -R "$(id -u):$(id -g)" "$XMCL_BUILDER_PROBE_ROOT/output"
+          go test ./internal/builder -run '^TestPublishedBuilderOutputLive$' -count=1 -v
       - name: Write cross-artifact release manifest
         env:
           IMAGE_DIGEST: ${{ steps.image-result.outputs.digest }}
+          BUILDER_IMAGE_DIGEST: ${{ steps.builder-image-result.outputs.digest }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           python3 scripts/write_release_manifest.py \
             --commit "$GITHUB_SHA" \
             --tag "$RELEASE_TAG" \
             --image-digest "$IMAGE_DIGEST" \
+            --builder-image-digest "$BUILDER_IMAGE_DIGEST" \
             --catalog runtime-image/runtime-catalog.lock.json \
+            --toolchain-catalog compiler/toolchain-catalog.lock.json \
             --agent dist/xmcl-shared-node-agent-linux-amd64 \
+            --agent-version-evidence dist/agent-version-evidence.json \
             --quota-helper dist/xmcl-quota-helper-linux-amd64 \
             --runtime dist/xmcl-shared-minecraft-runtime-linux-amd64 \
             --output dist/release-manifest.json
@@ -200,7 +318,8 @@ jobs:
             xmcl-quota-helper-linux-amd64 \
             xmcl-shared-minecraft-runtime-linux-amd64 \
             xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz \
-            release-manifest.json > SHA256SUMS)
+            release-manifest.json \
+            agent-version-evidence.json > SHA256SUMS)
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-path: |
@@ -209,10 +328,16 @@ jobs:
             dist/xmcl-shared-minecraft-runtime-linux-amd64
             dist/xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz
             dist/release-manifest.json
+            dist/agent-version-evidence.json
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-name: ghcr.io/voxelum/xmcl-shared-minecraft-runtime
           subject-digest: ${{ steps.image-result.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-name: ghcr.io/voxelum/xmcl-shared-node-builder
+          subject-digest: ${{ steps.builder-image-result.outputs.digest }}
           push-to-registry: true
       - name: Create immutable GitHub release
         env:
@@ -220,6 +345,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           gh release create "$RELEASE_TAG" \
+            --verify-tag --prerelease --latest=false \
             --target "$GITHUB_SHA" \
             --title "$RELEASE_TAG" \
             --notes "XMCL shared node runtime release $GITHUB_SHA" \
@@ -228,4 +354,5 @@ jobs:
             dist/xmcl-shared-minecraft-runtime-linux-amd64 \
             dist/xmcl-lightnode-bootstrap-runner-linux-amd64.tar.gz \
             dist/release-manifest.json \
+            dist/agent-version-evidence.json \
             dist/SHA256SUMS

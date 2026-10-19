@@ -11,12 +11,70 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/voxelum/xmcl-shared-node-agent/internal/controlplane"
 )
+
+type leaseGrantRecorder struct {
+	leases []controlplane.CommandLease
+}
+
+func (r *leaseGrantRecorder) RestoreWorkspaceGrants(_ context.Context, command controlplane.Command, _ string, _ []string) (controlplane.WorkspaceGrantResponse, error) {
+	r.leases = append(r.leases, command.Lease)
+	return controlplane.WorkspaceGrantResponse{}, nil
+}
+
+func (r *leaseGrantRecorder) SyncWorkspaceGrants(_ context.Context, command controlplane.Command, _ controlplane.WorkspaceManifest, _ string, _ []string) (controlplane.WorkspaceGrantResponse, error) {
+	r.leases = append(r.leases, command.Lease)
+	return controlplane.WorkspaceGrantResponse{}, nil
+}
+
+func (r *leaseGrantRecorder) PublishWorkspaceGrant(_ context.Context, command controlplane.Command, _ controlplane.WorkspaceManifest, _ string) (controlplane.WorkspaceGrantResponse, error) {
+	r.leases = append(r.leases, command.Lease)
+	return controlplane.WorkspaceGrantResponse{}, nil
+}
+
+func TestWorkspaceGrantRequestsUseCurrentLease(t *testing.T) {
+	initial := controlplane.CommandLease{Token: "initial", Generation: 1}
+	renewed := controlplane.CommandLease{Token: "renewed", Generation: 2}
+	var leaseMu sync.RWMutex
+	current := initial
+	ctx := controlplane.WithCommandLeaseSnapshot(t.Context(), func() controlplane.CommandLease {
+		leaseMu.RLock()
+		defer leaseMu.RUnlock()
+		return current
+	})
+	recorder := &leaseGrantRecorder{}
+	manager := &Manager{grants: recorder}
+	command := controlplane.Command{Lease: initial}
+	if _, err := manager.restoreWorkspaceGrants(ctx, command, "manifest", nil); err != nil {
+		t.Fatal(err)
+	}
+	leaseMu.Lock()
+	current = renewed
+	leaseMu.Unlock()
+	if _, err := manager.restoreWorkspaceGrants(ctx, command, "blobs", []string{"key"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.syncWorkspaceGrants(ctx, command, controlplane.WorkspaceManifest{}, "sha", []string{"key"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.publishWorkspaceGrant(ctx, command, controlplane.WorkspaceManifest{}, "sha"); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.leases) != 4 || recorder.leases[0] != initial {
+		t.Fatalf("workspace grant leases = %#v", recorder.leases)
+	}
+	for index, lease := range recorder.leases[1:] {
+		if lease != renewed {
+			t.Fatalf("workspace grant %d reused stale lease %#v", index+1, lease)
+		}
+	}
+}
 
 func TestCompilerRuntimeContentAcceptsReviewedConfigPaths(t *testing.T) {
 	command := controlplane.Command{
@@ -26,6 +84,7 @@ func TestCompilerRuntimeContentAcceptsReviewedConfigPaths(t *testing.T) {
 			ObjectPrefix: "shared-hosting/account_1/service_1/",
 		},
 	}
+
 	content := controlplane.WorkspaceBlob{
 		Key:            "shared-hosting/account_1/service_1/compiler-content/" + strings.Repeat("a", 64) + ".tar.zst",
 		SHA256:         strings.Repeat("b", 64),
@@ -44,6 +103,25 @@ func TestCompilerRuntimeContentAcceptsReviewedConfigPaths(t *testing.T) {
 	content.Paths = append(content.Paths, "world/level.dat")
 	if err := validateRuntimeContent(content, command); err == nil {
 		t.Fatal("compiler runtime content accepted a world path")
+	}
+}
+
+func TestPreparedRuntimeContentAcceptsOnlyCanonicalGlobalKey(t *testing.T) {
+	command := controlplane.Command{
+		AccountID: "account_1", ServiceID: "service_1",
+		Workspace: controlplane.Workspace{ObjectPrefix: "shared-hosting/account_1/service_1/"},
+	}
+	content := controlplane.WorkspaceBlob{
+		Key:    "shared-runtime/prepared/v1/linux-amd64/" + strings.Repeat("a", 64) + "/content.tar.zst",
+		SHA256: strings.Repeat("b", 64), CompressedSize: 4, LogicalSize: 4,
+		Paths: []string{".xmcl/launch.sh", ".xmcl/runtime.json"},
+	}
+	if err := validateRuntimeContent(content, command); err != nil {
+		t.Fatal(err)
+	}
+	content.Key = "shared-runtime/prepared/v1/linux-amd64/not-a-build/content.tar.zst"
+	if err := validateRuntimeContent(content, command); err == nil {
+		t.Fatal("noncanonical global prepared key was accepted")
 	}
 }
 
@@ -729,6 +807,19 @@ func TestDirectTransferRequiresImmutableAzurePutHeaders(t *testing.T) {
 	delete(grant.Headers, "x-ms-blob-type")
 	if err := transfer.validateGrant(grant, key, "PUT"); err == nil {
 		t.Fatal("Azure PUT without blob type was accepted")
+	}
+	grant.Headers["x-ms-blob-type"] = "BlockBlob"
+	grant.Headers["x-ms-meta-build-key"] = strings.Repeat("a", 64)
+	if err := transfer.validateGrant(grant, key, "PUT"); err == nil {
+		t.Fatal("Azure PUT with an unfrozen metadata header was accepted")
+	}
+	grant.Headers = map[string]string{
+		"If-None-Match":  "*",
+		"if-none-match":  "invalid",
+		"x-ms-blob-type": "BlockBlob",
+	}
+	if err := transfer.validateGrant(grant, key, "PUT"); err == nil {
+		t.Fatal("Azure PUT with case-variant duplicate headers was accepted")
 	}
 }
 
